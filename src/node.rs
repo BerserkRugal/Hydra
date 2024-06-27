@@ -1,5 +1,5 @@
 use std::sync::Arc;
-
+use std::collections::HashMap;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -23,9 +23,11 @@ impl Node {
         let block_tree = data::BlockTree::new(genesis, &config);
 
         let universe = config.get_voter_set();
-        let membership = config.get_initial_voter_set();
+        let imembership = config.get_initial_voter_set();
+        // let mut hisconf = HashMap::new();
+        // hisconf.insert(0,config.get_initial_voter_set());
         let l_set = config.get_l_set();
-        let state = Arc::new(Mutex::new(Environment::new(block_tree, universe, membership, l_set, network)));
+        let state = Arc::new(Mutex::new(Environment::new(block_tree, universe, imembership, l_set, network)));
         let voter = Voter::new(config.get_id(), config.to_owned(), state.to_owned());
 
         Self {

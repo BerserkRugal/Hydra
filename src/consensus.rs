@@ -1,10 +1,10 @@
 use crate::{
     crypto::{Digest, PublicKey, Signature},
-    data::{BlockType, QC},
+    data::{BlockType, Proof, ProofType},
     node_config::NodeConfig,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     slice::Iter,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -30,7 +30,7 @@ pub(crate) enum Message {
     Vote(Digest, PublicKey, Signature),
     // Contain the last vote of the sender, so that
     // it can tolerate more failures.
-    NewView(QC, Digest, PublicKey, Signature),
+    NewView(Proof, Digest, PublicKey, Signature),
 }
 
 impl Message {}
@@ -39,11 +39,18 @@ pub(crate) struct VoterState {
     pub id: PublicKey,
     pub view: u64,
     pub configuration: u64,
+    pub membership: VoterSet,
+    pub m_high: VoterSet,
+    pub m_valid: VoterSet,
+    pub hisconf: HashMap<u64, VoterSet>,
+    //pub membership: Vec<PublicKey>,
     pub threshold: usize,
-    pub generic_qc: QC,
-    pub locked_qc: QC,
+    pub proof_pre: Proof,
+    pub proof_com: Proof,
     // <view, (what, whos)>
     pub votes: HashMap<u64, HashMap<Digest, Vec<PublicKey>>>,
+    pub mmtable: HashMap<PublicKey, (u64, u64)>,
+    pub pool_m: Vec<PublicKey>,
     pub notify: Arc<Notify>,
     pub best_view: Arc<AtomicU64>,
     // <view, (whos)>
@@ -51,15 +58,21 @@ pub(crate) struct VoterState {
 }
 
 impl VoterState {
-    pub fn new(id: PublicKey, view: u64, configuration: u64, generic_qc: QC, threshold: usize) -> Self {
+    pub fn new(id: PublicKey, view: u64, configuration: u64, membership: VoterSet, hisconf: HashMap<u64, VoterSet>, proof_pre: Proof, threshold: usize) -> Self {
         Self {
             id,
             view,
             configuration,
+            membership: membership.to_owned(),
+            m_high: membership.to_owned(),
+            m_valid: membership,
+            hisconf,
             threshold,
-            generic_qc: generic_qc.to_owned(),
-            locked_qc: generic_qc,
+            proof_pre: proof_pre.to_owned(),
+            proof_com: proof_pre,
             votes: HashMap::new(),
+            mmtable: HashMap::new(),
+            pool_m: Vec::new(),
             notify: Arc::new(Notify::new()),
             best_view: Arc::new(AtomicU64::new(0)),
             new_views: HashMap::new(),
@@ -93,26 +106,26 @@ impl VoterState {
         }
     }
 
-    // return whether a new qc formed.
+    // return whether a new proof formed.
     pub(crate) fn add_vote(
         &mut self,
         msg_view: u64,
         block_hash: Digest,
         voter_id: PublicKey,
-    ) -> Option<QC> {
+    ) -> Option<Proof> {
         let view_map = self.votes.entry(msg_view).or_default();
         let voters = view_map.entry(block_hash).or_default();
         // TODO: check if voter_id is already in voters
         voters.push(voter_id);
 
-        if voters.len() == self.threshold {
+        if voters.len() == self.hisconf.get(&0).unwrap().threshold() {
             trace!(
                 "{}: Vote threshold {} is ready, current: {}",
                 self.id,
                 msg_view,
                 self.view
             );
-            Some(QC::new(block_hash, msg_view))
+            Some(Proof::new(block_hash, msg_view, ProofType::Con1(0), voters.clone()))
         } else {
             trace!(
                 "{}: Vote threshold {} is not ready, current: {}, threadhold: {}",
@@ -135,7 +148,40 @@ impl VoterState {
 
     pub(crate) fn set_threshold(&mut self, threshold: usize) {
       self.threshold = threshold;
-  }
+  } 
+    //pub(crate) fn update_membership(&mut self, m_new: Vec<PublicKey>) {
+    //  self.membership = m_new;
+    //}
+
+    pub(crate) fn insert_or_update(&mut self, key: PublicKey) {
+        match self.mmtable.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let (a, b) = entry.get_mut();
+                *a = 2u64.pow(*b as u32 + 1 + 2);
+                *b += 1;
+            },
+            Entry::Vacant(entry) => {
+                entry.insert((8, 1));
+            },
+        }
+    }
+
+    pub(crate) fn exists_with_a_gt_zero(&self, key: &PublicKey) -> bool {
+        if let Some((a, _)) = self.mmtable.get(key) {
+            *a > 0
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn decrement_all_a(&mut self) {
+        for (_, (a, _)) in self.mmtable.iter_mut() {
+            if *a > 0 {
+                *a -= 1;
+            }
+        }
+    }
+
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -152,7 +198,7 @@ pub struct NetworkPackage {
 pub struct Environment {
     pub(crate) block_tree: BlockTree,
     universe: VoterSet,
-    membership: VoterSet,
+    imembership: VoterSet,
     l_set: VoterSet,
     network: MemoryNetworkAdaptor,
     pub(crate) finalized_block_tx: Option<Sender<(Block, BlockType, u64)>>,
@@ -162,14 +208,14 @@ impl Environment {
     pub(crate) fn new(
         block_tree: BlockTree,
         universe: VoterSet,
-        membership: VoterSet,
+        imembership: VoterSet,
         l_set: VoterSet,
         network: MemoryNetworkAdaptor,
     ) -> Self {
         Self {
             block_tree,
             universe,
-            membership,
+            imembership,
             l_set,
             network,
             finalized_block_tx: None,
@@ -207,6 +253,26 @@ impl VoterSet {
     pub fn iter(&self) -> Iter<PublicKey> {
         self.voters.iter()
     }
+
+    pub fn add_voter(&mut self, voter: PublicKey) {
+          if !self.voters.contains(&voter) {
+              self.voters.push(voter);
+          }
+      }
+  
+      pub fn remove_voter(&mut self, voter: &PublicKey) {
+          if let Some(pos) = self.voters.iter().position(|x| x == voter) {
+              self.voters.remove(pos);
+          }
+      }
+  
+      pub fn contains_voter(&self, voter: &PublicKey) -> bool {
+          self.voters.contains(voter)
+      }
+  
+      pub fn replace_voters(&mut self, new_voters: Vec<PublicKey>) {
+          self.voters = new_voters;
+      }
 }
 
 impl Iterator for VoterSet {
@@ -232,14 +298,18 @@ impl Voter {
 
     pub(crate) async fn start(&mut self) {
         // Start from view 0, and keep increasing the view number
-        let generic_qc = self.env.lock().block_tree.genesis().0.justify.clone();
-        let voters = self.env.lock().membership.to_owned();
+        let proof_pre = self.env.lock().block_tree.genesis().0.justify.clone();
+        let voters = self.env.lock().imembership.to_owned();
+        let mut hisconf = HashMap::new();
+        hisconf.insert(0,voters.clone());
         let l_set = self.env.lock().l_set.to_owned();
         let state = Arc::new(Mutex::new(VoterState::new(
             self.id,
             self.view,
             self.configuration,
-            generic_qc,
+            voters.to_owned(),
+            hisconf,
+            proof_pre,
             voters.threshold(),
         )));
         let notify = state.lock().best_view_ref();
@@ -350,28 +420,28 @@ impl ConsensusVoter {
     fn new_key_block(
         env: Arc<Mutex<Environment>>,
         view: u64,
-        generic_qc: QC,
+        proof_pre: Proof,
         id: PublicKey,
     ) -> NetworkPackage {
-        let block = env.lock().block_tree.new_key_block(generic_qc);
+        let block = env.lock().block_tree.new_key_block(proof_pre);
         Self::package_message(id, Message::Propose(block), view, None)
     }
 
-    fn update_qc_high(&self, new_qc: QC) -> bool {
+    fn update_proof_high(&self, new_proof: Proof) -> bool {
         let mut state = self.state.lock();
-        if new_qc.view > state.generic_qc.view {
+        if new_proof.view > state.proof_pre.view {
             debug!(
-                "Node {} update qc_high from {:?} to {:?}",
+                "Node {} update proof_pre from {:?} to {:?}",
                 self.config.get_id(),
-                state.generic_qc,
-                new_qc
+                state.proof_pre,
+                new_proof
             );
-            state.generic_qc = new_qc.to_owned();
+            state.proof_pre = new_proof.to_owned();
             drop(state);
             self.env
                 .lock()
                 .block_tree
-                .switch_latest_key_block(new_qc.node);
+                .switch_latest_key_block(new_proof.node);
             true
         } else {
             false
@@ -410,13 +480,13 @@ impl ConsensusVoter {
 
                 // onReceiveProposal
                 if let Some(pkg) = {
-                    let locked_qc = self.state.lock().locked_qc.clone();
+                    let proof_com = self.state.lock().proof_com.clone();
                     let safety = self
                         .env
                         .lock()
                         .block_tree
-                        .extends(locked_qc.node, block_hash);
-                    let liveness = block_justify.view >= locked_qc.view;
+                        .extends(proof_com.node, block_hash);
+                    let liveness = block_justify.view >= proof_com.view;
 
                     if view > *voted_view && (safety || liveness) {
                         *voted_view = view;
@@ -464,7 +534,7 @@ impl ConsensusVoter {
 
                 trace!("{}: enter PRE-COMMIT phase", id);
                 // PRE-COMMIT phase on b_x
-                self.update_qc_high(block_justify);
+                self.update_proof_high(block_justify);
 
                 let larger_view = self
                     .env
@@ -475,11 +545,11 @@ impl ConsensusVoter {
                     .0
                     .justify
                     .view
-                    > self.state.lock().locked_qc.view;
+                    > self.state.lock().proof_com.view;
                 if larger_view {
                     trace!("{}: enter COMMIT phase", id);
                     // COMMIT phase on b_y
-                    self.state.lock().locked_qc = self
+                    self.state.lock().proof_com = self
                         .env
                         .lock()
                         .block_tree
@@ -514,25 +584,25 @@ impl ConsensusVoter {
             }
             Message::Vote(block_hash, author, signature) => {
                 // onReceiveVote
-                let qc = self.state.lock().add_vote(view, block_hash, from);
+                let proof = self.state.lock().add_vote(view, block_hash, from);
 
                 // verify signature
                 author.verify(&block_hash, &signature).unwrap();
 
-                if let Some(qc) = qc {
-                    self.update_qc_high(qc);
+                if let Some(proof) = proof {
+                    self.update_proof_high(proof);
                     self.state.lock().set_best_view(view);
                 }
             }
-            Message::NewView(high_qc, digest, author, signature) => {
-                self.update_qc_high(high_qc);
+            Message::NewView(high_proof, digest, author, signature) => {
+                self.update_proof_high(high_proof);
 
                 author.verify(&digest, &signature).unwrap();
 
-                let qc = self.state.lock().add_vote(view, digest, from);
+                let proof = self.state.lock().add_vote(view, digest, from);
 
-                if let Some(qc) = qc {
-                    self.update_qc_high(qc);
+                if let Some(proof) = proof {
+                    self.update_proof_high(proof);
                     self.state.lock().set_best_view(view);
                 }
 
@@ -634,15 +704,15 @@ impl ConsensusVoter {
             if self.leadership.get_leader(view) == id {
                 tracing::trace!("{}: start as leader in view: {}", id, view);
  
-                let generic_qc = { self.state.lock().generic_qc.to_owned() };
+                let proof_pre = { self.state.lock().proof_pre.to_owned() };
 
                 while self.collect_view.load(Ordering::SeqCst) + 1 < view {
                     tokio::task::yield_now().await;
                 }
 
                 // onPropose
-                let generic_qc = self.state.lock().generic_qc.clone();
-                let pkg = Self::new_key_block(self.env.to_owned(), view, generic_qc, id);
+                let proof_pre = self.state.lock().proof_pre.clone();
+                let pkg = Self::new_key_block(self.env.to_owned(), view, proof_pre, id);
                 tracing::trace!("{}: leader propose block in view: {}", id, view);
                 tx.send(pkg).await.unwrap();
             }
@@ -708,7 +778,7 @@ impl ConsensusVoter {
         let id = self.config.get_id();
         let signature = self.config.get_private_key().sign(&digest);
         let new_view =
-            Message::NewView(self.state.lock().generic_qc.clone(), digest, id, signature);
+            Message::NewView(self.state.lock().proof_pre.clone(), digest, id, signature);
         Self::package_message(self.state.lock().id, new_view, view, Some(next_leader))
     }
 

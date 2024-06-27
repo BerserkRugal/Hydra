@@ -15,6 +15,23 @@ pub enum CommandType {
     Transfer(usize, usize, i64),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum ProofType {
+    High(Vec<PublicKey>),
+    Val(Vec<PublicKey>),
+    Auto(Vec<PublicKey>),
+    Con1(u64),
+    Con2(u64),
+    Com(u64),
+}
+
+impl Default for ProofType {
+  fn default() -> Self {
+      ProofType::Con1(0)
+  }
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Command {
     pub(crate) id: usize,
@@ -78,15 +95,21 @@ pub(crate) trait CommandGetter: Send + Sync {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct QC {
+pub struct Proof {
     pub(crate) node: Digest,
     pub view: u64,
+    pub(crate) prooftype: ProofType,
+    pub votes: Vec<PublicKey>,
 }
 
-impl QC {
-    pub(crate) fn new(node: Digest, view: u64) -> Self {
-        Self { node, view }
+impl Proof {
+    pub(crate) fn new(node: Digest, view: u64, prooftype: ProofType, votes: Vec<PublicKey>) -> Self {
+        Self { node, view, prooftype, votes}
     }
+
+    // pub(crate) fn isProof(self, node: Digest, prooftype: ProofType) -> bool {
+    //    self.node == node && self.prooftype = prooftype
+    // }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +136,7 @@ pub struct Block {
     pub hash: Digest,
     pub height: usize,
     pub(crate) prev_hash: Digest,
-    pub justify: QC,
+    pub justify: Proof,
     pub payloads: Vec<Transaction>,
     pub timestamp: u64,
     pub author: PublicKey,
@@ -145,7 +168,7 @@ impl Block {
     pub fn new(
         prev_hash: Digest,
         prev_height: usize,
-        justify: QC,
+        justify: Proof,
         payloads: Vec<Transaction>,
         author: PublicKey,
         private_key: &Keypair,
@@ -264,7 +287,7 @@ impl BlockTree {
     }
 
     /// New key block always be built upon latest_key_block.
-    pub(crate) fn new_key_block(&mut self, justify: QC) -> Block {
+    pub(crate) fn new_key_block(&mut self, justify: Proof) -> Block {
         // if self.latest_key_block is parent key block of self.latest,
         // generate leaf on top of self.latest
         //
@@ -367,7 +390,7 @@ impl BlockTree {
     //     println!("=======");
     //     for (hash, (block, block_type)) in blocks {
     //         println!(
-    //             "hash: {}, height: {}, type: {:?}, parent: {}, QC: {:?}",
+    //             "hash: {}, height: {}, type: {:?}, parent: {}, Proof: {:?}",
     //             hash, block.height, block_type, block.prev_hash, block.justify
     //         );
     //     }
@@ -379,7 +402,7 @@ impl BlockTree {
         println!("=======");
         for (hash, (block, block_type)) in blocks {
             println!(
-                "hash: {}, height: {}, type: {:?}, parent: {}, QC: {:?}, from: {:?}",
+                "hash: {}, height: {}, type: {:?}, parent: {}, Proof: {:?}, from: {:?}",
                 hash,
                 block.height,
                 block_type,
@@ -575,7 +598,7 @@ impl BlockGenerator {
         &mut self,
         prev_hash: Digest,
         prev_height: usize,
-        justify: QC,
+        justify: Proof,
         author: PublicKey,
         priv_key: &Keypair,
     ) -> Block {
@@ -587,7 +610,7 @@ impl BlockGenerator {
         &mut self,
         prev_hash: Digest,
         prev_height: usize,
-        justify: QC,
+        justify: Proof,
         lowerbound: usize,
         author: PublicKey,
         priv_key: &Keypair,
