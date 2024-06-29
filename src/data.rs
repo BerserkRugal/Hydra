@@ -17,6 +17,7 @@ pub enum CommandType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum ProofType {
+    Absent,
     High(Vec<PublicKey>),
     Val(Vec<PublicKey>),
     Auto(Vec<PublicKey>),
@@ -107,6 +108,34 @@ impl Proof {
         Self { node, view, prooftype, votes}
     }
 
+    pub(crate) fn is_formal_proof(self, node: Digest, prooftype: ProofType) -> bool {
+      if self.node == node{
+      match (self.prooftype, prooftype) {
+        (ProofType::Con2(value1), ProofType::Con1(value2))
+        | (ProofType::Com(value1), ProofType::Con2(value2)) => {if value1 == value2 {return true;}}
+        _ => {}
+      };
+    }
+      // todo: determine if the votes are from members in the corresponding configuration.
+        //let set1: std::collections::HashSet<&PublicKey> = self.votes.iter().collect();
+        //let set2: std::collections::HashSet<&PublicKey> = membership.iter().collect();
+        //if set1.is_subset(&set2)
+        return false;
+    }
+
+    // pub(crate) fn in_con1(&self, key: &PublicKey) -> bool {
+    //     match &self.prooftype {
+    //         ProofType::Con1(keys) => keys.contains(key),
+    //         _ => false,
+    //     }
+    // }
+
+    // pub(crate) fn in_con2(&self, key: &PublicKey) -> bool {
+    //     match &self.prooftype {
+    //         ProofType::Con2(keys) => keys.contains(key),
+    //         _ => false,
+    //     }
+    // }
     // pub(crate) fn isProof(self, node: Digest, prooftype: ProofType) -> bool {
     //    self.node == node && self.prooftype = prooftype
     // }

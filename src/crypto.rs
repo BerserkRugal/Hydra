@@ -17,6 +17,15 @@ pub enum CryptoError {
     ParseError(#[from] ed25519_dalek::SignatureError),
 }
 
+#[derive(Debug)]
+pub struct ParseDigestError;
+
+impl std::fmt::Display for ParseDigestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Failed to parse Digest")
+    }
+}
+
 #[derive(PartialEq, Eq, Serialize, Clone, Copy, Deserialize, Default, Hash)]
 pub struct Digest([u8; 32]);
 
@@ -41,6 +50,23 @@ impl Digest {
 
     pub fn display(&self) -> String {
         self.to_hex().chars().take(8).collect::<String>()
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, ParseDigestError> {
+        if s.len() != 64 {
+            return Err(ParseDigestError);
+        }
+
+        let mut data = [0u8; 32];
+        let hex_chars = s.chars().collect::<Vec<char>>();
+
+        for (i, chunk) in hex_chars.chunks(2).enumerate() {
+            let byte_str: String = chunk.iter().collect();
+            let byte = u8::from_str_radix(&byte_str, 16).map_err(|_| ParseDigestError)?;
+            data[i] = byte;
+        }
+
+        Ok(Digest(data))
     }
 }
 
