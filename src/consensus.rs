@@ -47,6 +47,7 @@ pub(crate) struct VoterState {
     pub threshold: usize,
     pub proof_pre: Proof,
     pub proof_com: Proof,
+    pub proof_new: Proof,
     // <view, (what, whos)>
     pub votes: HashMap<u64, HashMap<Digest, Vec<PublicKey>>>,
     pub proofs: HashMap<u64, Vec<Proof>>,
@@ -71,7 +72,8 @@ impl VoterState {
             hisconf,
             threshold,
             proof_pre: proof_pre.to_owned(),
-            proof_com: proof_pre,
+            proof_com: proof_pre.to_owned(),
+            proof_new: proof_pre,
             votes: HashMap::new(),
             proofs: HashMap::new(),
             prooflist: Vec::new(),
@@ -157,7 +159,7 @@ impl VoterState {
          let view_map = self.votes.entry(msg_view).or_default();
          let proof_map = self.proofs.entry(msg_view).or_default();
          let mut tn = target_num;
-         trace!("{}'d like to see what is proof_pre now: {:?}", self.id, self.proof_pre);
+         // trace!("{}'d like to see what is proof_pre now: {:?}", self.id, self.proof_pre);
          match self.proof_pre.prooftype {
             ProofType::Con1(value) => {
               if self.hisconf.contains_key(&value){
@@ -172,7 +174,7 @@ impl VoterState {
                           msg_view,
                           self.view
                       );
-                      proof_map.push(Proof::new(self.proof_pre.node, msg_view, ProofType::Con2(value), voters.clone()));
+                      proof_map.push(Proof::new(self.proof_pre.node, self.proof_pre.view, ProofType::Con2(value), voters.clone()));
                     } else {
                       
                     }
@@ -182,7 +184,7 @@ impl VoterState {
             }
             _ => {tn = tn - 1; println!("proof_pre do not exist or it is not a Con1 type proof.")}
         }
-        trace!("{}'d like to see what is proof_com now: {:?}", self.id, self.proof_com);
+        // trace!("{}'d like to see what is proof_com now: {:?}", self.id, self.proof_com);
         match self.proof_com.prooftype {
             ProofType::Con2(value) => {
               if self.hisconf.contains_key(&value){
@@ -197,7 +199,7 @@ impl VoterState {
                           msg_view,
                           self.view
                       );
-                      proof_map.push(Proof::new(self.proof_com.node, msg_view, ProofType::Com(value), voters.clone()));
+                      proof_map.push(Proof::new(self.proof_com.node, self.proof_com.view, ProofType::Com(value), voters.clone()));
                     } else {
                       
                     }
@@ -205,8 +207,44 @@ impl VoterState {
                 }
               }
             }
-            _ => {tn = tn - 1; println!("proof_com do not exist or it is not a Con2 type proof.")}
+            _ => {tn = tn - 1; trace!("proof_com do not exist or it is not a Con2 type proof.")}
         }
+       // if !self.m_high.is_equal(self.membership){     
+        if self.m_high.contains_voter(&voter_id){
+          let voters = view_map.entry(Digest::high()).or_default();
+          voters.push(voter_id);
+          if voters.len() == self.m_high.threshold() {
+                      trace!(
+                          "{}: creating High proof in {}, current: {}",
+                          self.id,
+                          msg_view,
+                          self.view
+                      );
+           proof_map.push(Proof::new(self.proof_pre.node, self.proof_pre.view, ProofType::High(self.m_high.get_voters()), voters.clone()));
+           } else {
+                      
+                    }          
+        }
+      // }
+        // if !self.m_val.is_equal(self.m_val){     
+          if self.m_valid.contains_voter(&voter_id){
+            let voters = view_map.entry(Digest::val()).or_default();
+            voters.push(voter_id);
+            if voters.len() == self.m_valid.threshold() {
+                        trace!(
+                            "{}: creating Val proof in {}, current: {}",
+                            self.id,
+                            msg_view,
+                            self.view
+                        );
+             proof_map.push(Proof::new(self.proof_com.node, self.proof_com.view, ProofType::Val(self.m_valid.get_voters()), voters.clone()));
+             } else {
+                        
+                      }          
+          }
+        // }
+      
+
         if proof_map.len() == tn as usize {
           trace!(
               "{}: finishing creating prooflist in {}, len: {}, current: {}",
@@ -355,6 +393,14 @@ impl VoterSet {
   
       pub fn replace_voters(&mut self, new_voters: Vec<PublicKey>) {
           self.voters = new_voters;
+      }
+
+      pub fn get_voters(&self) -> Vec<PublicKey> {
+        self.voters.clone()
+      }
+
+      pub fn is_equal(&self, voters: VoterSet) -> bool {
+        self.voters.clone().sort() == voters.get_voters().sort()
       }
 }
 
@@ -521,6 +567,28 @@ impl ConsensusVoter {
                 new_proof
             );
             state.proof_pre = new_proof.to_owned();
+            state.proof_new = new_proof.to_owned();
+            drop(state);
+            self.env
+                .lock()
+                .block_tree
+                .switch_latest_key_block(new_proof.node);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn update_proof_new(&self, new_proof: Proof) -> bool {
+        let mut state = self.state.lock();
+        if new_proof.view > state.proof_new.view {
+            debug!(
+                "Node {} update proof_new from {:?} to {:?}",
+                self.config.get_id(),
+                state.proof_new,
+                new_proof
+            );
+            state.proof_new = new_proof.to_owned();
             drop(state);
             self.env
                 .lock()
@@ -557,25 +625,21 @@ impl ConsensusVoter {
                 let proof_pre = self.state.lock().proof_pre.clone();
                 let mut proofcon2 = Proof::default();
                 let mut proofcom = Proof::default();
+                let mut proofhigh = Proof::default();
+                let mut proofval = Proof::default();
                 for proof in prooflist{
                   match proof.prooftype {
-                    // Proof::High(public_keys) => {
-                    //     println!("ProofType is High: {:?}", public_keys);
-                    // }
-                    // Proof::Val(public_keys) => {
-                    //     println!("ProofType is Val: {:?}", public_keys);
-                    // }
-                    // Proof::Auto(public_keys) => {
-                    //     println!("ProofType is Auto: {:?}", public_keys);
-                    // }
-                    // Proof::Con1(value) => {
-                        
-                    // }
                     ProofType::Con2(value) => {
                       proofcon2 = proof;
                     }
                     ProofType::Com(value) => {
                       proofcom = proof;
+                    }
+                    ProofType::High(ref vec) => {
+                      proofhigh = proof;
+                    }
+                    ProofType::Val(ref vec) => {
+                      proofval = proof;
                     }
                     _=>{}
                 }
@@ -660,7 +724,7 @@ impl ConsensusVoter {
                 if larger_view {
                     trace!("{}: enter COMMIT phase", id);
                     // COMMIT phase on b_y
-                    trace!("{}: proof_pre :{:?} proof_con2 : {:?}", id, proof_pre, proofcon2);
+                    // trace!("{}: proof_pre :{:?} proof_con2 : {:?}", id, proof_pre, proofcon2);
                     if proofcon2.clone().is_formal_proof(proof_pre.node, proof_pre.prooftype){
                       self.state.lock().proof_com = proofcon2.clone();
                       trace!("{}: update proof_com from :{:?} to : {:?}", id, proof_com, proofcon2);
@@ -680,6 +744,7 @@ impl ConsensusVoter {
                 if is_parent {
                     let is_parent = self.env.lock().block_tree.is_parent(b_z, b_y);
                     if is_parent {
+                        if proofcom.clone().is_formal_proof(proof_com.node, proof_com.prooftype){
                         trace!("{}: enter DECIDE phase", id);
                         // DECIDE phase on b_z / Finalize b_z
                         let finalized_blocks = self.env.lock().block_tree.finalize(b_z);
@@ -689,6 +754,7 @@ impl ConsensusVoter {
                                 tx.send(block).await.unwrap();
                             }
                         }
+                      }
                     }
                 }
 
@@ -701,7 +767,7 @@ impl ConsensusVoter {
             Message::Vote(block_hash, author, signature) => {
                 // onReceiveVote
                 let proof = self.state.lock().add_vote(view, block_hash, from);
-                let prooflist = self.state.lock().create_prooflist(view, from, 2);
+                let prooflist = self.state.lock().create_prooflist(view, from, 4);
                 // verify signature
                 author.verify(&block_hash, &signature).unwrap();
 
@@ -711,7 +777,8 @@ impl ConsensusVoter {
                 // }
                 if let Some(proof) = proof {
                   if let Some(prooflist) = prooflist{
-                    self.update_proof_pre(proof);
+                    // self.update_proof_pre(proof);
+                    self.update_proof_new(proof);
                     self.state.lock().prooflist = prooflist;
                     self.state.lock().set_best_view(view);
                   }
@@ -834,9 +901,9 @@ impl ConsensusVoter {
                 }
 
                 // onPropose
-                let proof_pre = self.state.lock().proof_pre.clone();
+                let proof_new = self.state.lock().proof_new.clone();
                 let prooflist = self.state.lock().prooflist.clone();
-                let pkg = Self::new_key_block(self.env.to_owned(), view, proof_pre, prooflist, id);
+                let pkg = Self::new_key_block(self.env.to_owned(), view, proof_new, prooflist, id);
                 tracing::trace!("{}: leader propose block in view: {}", id, view);
                 tx.send(pkg).await.unwrap();
             }
