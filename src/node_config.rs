@@ -103,7 +103,7 @@ pub(crate) struct TestMode {
     #[serde(default)]
     pub(crate) delay_test: bool,
     #[serde(default)]
-    pub(crate) memory_test: bool,
+    pub(crate) memory_test_join: bool,
     #[serde(default)]
     pub(crate) fault_tolerance_test: bool,
 }

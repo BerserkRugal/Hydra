@@ -38,16 +38,17 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     match cli.command {
-        Some(Commands::MemoryTest { number, initial_number }) => {
+        Some(Commands::MemoryTestJoin { number, initial_number }) => {
             let voter_set: Vec<_> = generate_keypairs(number);
             let inum = min(number, initial_number);
             let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
             let initial_set: Vec<_> = voter_set.iter().take(inum).cloned().collect();
+            let rest_set: Vec<_> = voter_set.iter().filter(|&element| !initial_set.contains(element)).cloned().collect();
             let l_set: Vec<_> = voter_set.iter().take(lnum).cloned().collect();
             let genesis = data::Block::genesis();
 
             let mut network = MemoryNetwork::new();
-            config.test_mode.memory_test = true;
+            config.test_mode.memory_test_join = true;
 
             // Mock peers
             config.override_voter_set(&VoterSet::new(
@@ -62,7 +63,7 @@ async fn main() -> Result<()> {
 
 
             // Prepare the environment.
-            let nodes: Vec<_> = voter_set
+            let nodes: Vec<_> = initial_set
                 .into_iter()
                 .map(|(id, secret)| {
                     let adaptor = network.register(id);
@@ -73,6 +74,18 @@ async fn main() -> Result<()> {
                     )
                 })
                 .collect();
+
+             let rest_nodes: Vec<_> = rest_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();    
 
             // Boot up the network.
             let handle = tokio::spawn(async move {
@@ -85,6 +98,10 @@ async fn main() -> Result<()> {
             // Run the nodes.
             nodes.into_iter().for_each(|node| {
                 node.spawn_run();
+            });
+
+            rest_nodes.into_iter().for_each(|node| {
+                node.spawn_run_join_test();
             });
 
             let _ = tokio::join!(handle);

@@ -64,7 +64,7 @@ pub(crate) struct Cli {
 #[derive(Parser, Debug)]
 pub(crate) enum Commands {
     /// Run the node within memory network.
-    MemoryTest {
+    MemoryTestJoin {
         /// Number of nodes (universe).
         #[arg(short, long, default_value_t = 4)]
         number: usize,

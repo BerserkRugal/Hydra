@@ -162,7 +162,9 @@ pub struct Block {
     pub height: usize,
     pub(crate) prev_hash: Digest,
     pub justify: Proof,
-    pub payloads: Vec<Transaction>,
+    pub payloads: Vec<Transaction>, //regular requsts
+    pub join_reqm: Vec<PublicKey>, 
+    pub leave_reqm: Vec<PublicKey>,
     pub timestamp: u64,
     pub author: PublicKey,
     pub signature: Signature,
@@ -174,7 +176,8 @@ impl std::fmt::Debug for Block {
             .field("height", &self.height)
             .field("prev_hash", &self.prev_hash)
             .field("justify", &self.justify)
-            .field("payloads", &self.payloads.len())
+            .field("join_reqm", &self.join_reqm.len())
+            .field("leave_reqm", &self.leave_reqm.len())
             .field("timestamp", &self.timestamp)
             .field("author", &self.author)
             .finish()
@@ -195,6 +198,8 @@ impl Block {
         prev_height: usize,
         justify: Proof,
         payloads: Vec<Transaction>,
+        join_reqm: Vec<PublicKey>, 
+        leave_reqm: Vec<PublicKey>, 
         author: PublicKey,
         private_key: &Keypair,
     ) -> Self {
@@ -221,6 +226,8 @@ impl Block {
             prev_hash,
             justify,
             payloads,
+            join_reqm,
+            leave_reqm,
             timestamp,
         }
     }
@@ -312,7 +319,7 @@ impl BlockTree {
     }
 
     /// New key block always be built upon latest_key_block.
-    pub(crate) fn new_key_block(&mut self, justify: Proof) -> Block {
+    pub(crate) fn new_key_block(&mut self, justify: Proof, join_reqm: Vec<PublicKey>, leave_reqm: Vec<PublicKey>) -> Block {
         // if self.latest_key_block is parent key block of self.latest,
         // generate leaf on top of self.latest
         //
@@ -334,6 +341,8 @@ impl BlockTree {
             justify,
             self.config.get_id(),
             self.config.get_private_key(),
+            join_reqm,
+            leave_reqm
         );
 
         // update parent_key_block
@@ -626,8 +635,10 @@ impl BlockGenerator {
         justify: Proof,
         author: PublicKey,
         priv_key: &Keypair,
+        join_reqm: Vec<PublicKey>,
+        leave_reqm: Vec<PublicKey>,
     ) -> Block {
-        self.new_block_with_lowerbound(prev_hash, prev_height, justify, 0, author, priv_key)
+        self.new_block_with_lowerbound(prev_hash, prev_height, justify, 0, author, priv_key, join_reqm, leave_reqm)
             .unwrap()
     }
 
@@ -639,10 +650,12 @@ impl BlockGenerator {
         lowerbound: usize,
         author: PublicKey,
         priv_key: &Keypair,
+        join_reqm: Vec<PublicKey>,
+        leave_reqm: Vec<PublicKey>,
     ) -> Option<Block> {
         let payloads = self.mempool.get_commands_with_lowerbound(lowerbound);
         payloads
-            .map(|payloads| Block::new(prev_hash, prev_height, justify, payloads, author, priv_key))
+            .map(|payloads| Block::new(prev_hash, prev_height, justify, payloads, join_reqm, leave_reqm, author, priv_key))
     }
 }
 

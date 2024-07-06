@@ -41,7 +41,15 @@ impl Node {
         info!("Node config: {:#?}", self.config);
         println!("Voter is running: {}", self.config.get_id());
         tokio::spawn(async move {
-            self.voter.start().await;
+            self.voter.start(0).await;
+        })
+    }
+
+    pub(crate) fn spawn_run_join_test(mut self) -> JoinHandle<()> {
+        info!("Node config: {:#?}", self.config);
+        println!("Voter is running: {}", self.config.get_id());
+        tokio::spawn(async move {
+            self.voter.start(1).await;
         })
     }
 

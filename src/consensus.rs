@@ -31,6 +31,8 @@ pub(crate) enum Message {
     // Contain the last vote of the sender, so that
     // it can tolerate more failures.
     NewView(Proof, Digest, PublicKey, Signature),
+    Join,
+    Leave,
 }
 
 impl Message {}
@@ -53,7 +55,8 @@ pub(crate) struct VoterState {
     pub proofs: HashMap<u64, Vec<Proof>>,
     pub prooflist: Vec<Proof>,
     pub mmtable: HashMap<PublicKey, (u64, u64)>,
-    pub pool_m: Vec<PublicKey>,
+    pub pool_m_join: Vec<PublicKey>,
+    pub pool_m_leave: Vec<PublicKey>,
     pub notify: Arc<Notify>,
     pub best_view: Arc<AtomicU64>,
     // <view, (whos)>
@@ -78,7 +81,8 @@ impl VoterState {
             proofs: HashMap::new(),
             prooflist: Vec::new(),
             mmtable: HashMap::new(),
-            pool_m: Vec::new(),
+            pool_m_join: Vec::new(),
+            pool_m_leave: Vec::new(),
             notify: Arc::new(Notify::new()),
             best_view: Arc::new(AtomicU64::new(0)),
             new_views: HashMap::new(),
@@ -312,6 +316,7 @@ pub struct NetworkPackage {
     pub(crate) to: Option<PublicKey>,
     /// None means the message is a global message.
     pub(crate) view: Option<u64>,
+    pub(crate) configuration: Option<u64>,
     pub(crate) message: Message,
     pub(crate) signature: u64,
 }
@@ -348,6 +353,7 @@ impl Environment {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Voter {
     id: PublicKey,
     config: NodeConfig,
@@ -425,7 +431,7 @@ impl Voter {
         }
     }
 
-    pub(crate) async fn start(&mut self) {
+    pub(crate) async fn start(&mut self, mode: usize) {
         // Start from view 0, and keep increasing the view number
         let proof_pre = self.env.lock().block_tree.genesis().0.justify.clone();
         let voters = self.env.lock().imembership.to_owned();
@@ -465,12 +471,40 @@ impl Voter {
         let handler3 = tokio::spawn(async {
             pacemaker.run_as_pacemaker().await;
         });
-
+        
+        if mode == 1 {
+          let self_clone = self.clone();
+          tokio::spawn(async move{ 
+          std::thread::sleep_ms(2000);
+          self_clone.test_join().await;
+        });
+        }
         let (r1, r2, r3) = tokio::join!(handler1, handler2, handler3);
+        
         // TODO: handle error
         r1.unwrap();
         r2.unwrap();
         r3.unwrap();
+        
+    }
+
+    pub(crate) async fn test_join(&self) {
+        let (mut tx) = {
+            let mut env = self.env.lock();
+            let tx = env.network.get_sender();
+            (tx)
+        };
+        let to = self.config.get_l_set().get_voters().clone().pop().unwrap();
+        let pkg = NetworkPackage {
+          from: self.id,
+          to: Some(to),
+          view: Some(self.view),
+          configuration: Some(self.configuration),
+          message: Message::Join,
+          signature: 0,
+      };
+      println!("{} sending join request pkg {:?} to: {}", self.id, pkg, to);
+      tx.send(pkg).await.unwrap();
     }
 }
 
@@ -504,6 +538,10 @@ impl Leadership {
             .unwrap()
             .to_owned()
     }
+
+    fn is_in_L(&self, replica: PublicKey) -> bool {
+        self.l_set.contains_voter(&replica)
+    }
 }
 
 impl ConsensusVoter {
@@ -535,12 +573,14 @@ impl ConsensusVoter {
         id: PublicKey,
         message: Message,
         view: u64,
+        configuration: u64,
         to: Option<PublicKey>,
     ) -> NetworkPackage {
         NetworkPackage {
             from: id,
             to,
             view: Some(view),
+            configuration: Some(configuration),
             message,
             signature: 0,
         }
@@ -549,12 +589,15 @@ impl ConsensusVoter {
     fn new_key_block(
         env: Arc<Mutex<Environment>>,
         view: u64,
+        configuration: u64,
         proof_pre: Proof,
         prooflist: Vec<Proof>,
         id: PublicKey,
+        join_reqm: Vec<PublicKey>, 
+        leave_reqm: Vec<PublicKey>
     ) -> NetworkPackage {
-        let block = env.lock().block_tree.new_key_block(proof_pre);
-        Self::package_message(id, Message::Propose(block, prooflist), view, None)
+        let block = env.lock().block_tree.new_key_block(proof_pre, join_reqm, leave_reqm);
+        Self::package_message(id, Message::Propose(block, prooflist), view, configuration, None)
     }
 
     fn update_proof_pre(&self, new_proof: Proof) -> bool {
@@ -612,6 +655,7 @@ impl ConsensusVoter {
         let message = pkg.message;
         let from = pkg.from;
         let current_view = self.state.lock().view;
+        let current_conf = self.state.lock().configuration;
         match message {
             Message::Propose(block, prooflist) => {
                 if view < self.state.lock().view {
@@ -623,6 +667,8 @@ impl ConsensusVoter {
                 block.verify().unwrap();
                 let proof_com = self.state.lock().proof_com.clone();
                 let proof_pre = self.state.lock().proof_pre.clone();
+                let m_high = self.state.lock().m_high.get_voters().clone();
+                let m_valid = self.state.lock().m_valid.get_voters().clone();
                 let mut proofcon2 = Proof::default();
                 let mut proofcom = Proof::default();
                 let mut proofhigh = Proof::default();
@@ -671,6 +717,7 @@ impl ConsensusVoter {
                             id,
                             Message::Vote(hash, id, self.config.sign(&hash)),
                             current_view,
+                            current_conf,
                             Some(self.leadership.get_leader(current_view + 1)),
                         ))
                     } else {
@@ -688,24 +735,24 @@ impl ConsensusVoter {
                 }
 
                 // update
-                let b_y = self
-                    .env
-                    .lock()
-                    .block_tree
-                    .get_block(b_x)
-                    .unwrap()
-                    .0
-                    .justify
-                    .node;
-                let b_z = self
-                    .env
-                    .lock()
-                    .block_tree
-                    .get_block(b_y)
-                    .unwrap()
-                    .0
-                    .justify
-                    .node;
+                // let b_y = self
+                //     .env
+                //     .lock()
+                //     .block_tree
+                //     .get_block(b_x)
+                //     .unwrap()
+                //     .0
+                //     .justify
+                //     .node;
+                // let b_z = self
+                //     .env
+                //     .lock()
+                //     .block_tree
+                //     .get_block(b_y)
+                //     .unwrap()
+                //     .0
+                //     .justify
+                //     .node;
 
                 trace!("{}: enter PRE-COMMIT phase", id);
                 // PRE-COMMIT phase on b_x
@@ -726,8 +773,10 @@ impl ConsensusVoter {
                     // COMMIT phase on b_y
                     // trace!("{}: proof_pre :{:?} proof_con2 : {:?}", id, proof_pre, proofcon2);
                     if proofcon2.clone().is_formal_proof(proof_pre.node, proof_pre.prooftype){
-                      self.state.lock().proof_com = proofcon2.clone();
-                      trace!("{}: update proof_com from :{:?} to : {:?}", id, proof_com, proofcon2);
+                      if proofhigh.clone().is_temp_proof(proof_pre.node, ProofType::High(m_high)){
+                        self.state.lock().proof_com = proofcon2.clone();
+                        trace!("{}: update proof_com from :{:?} to : {:?}", id, proof_com, proofcon2);
+                      }
                     }
                     // self.state.lock().proof_com = self
                     //     .env
@@ -740,14 +789,16 @@ impl ConsensusVoter {
                     //     .clone();
                 }
 
-                let is_parent = self.env.lock().block_tree.is_parent(b_y, b_x);
-                if is_parent {
-                    let is_parent = self.env.lock().block_tree.is_parent(b_z, b_y);
-                    if is_parent {
-                        if proofcom.clone().is_formal_proof(proof_com.node, proof_com.prooftype){
+                // let is_parent = self.env.lock().block_tree.is_parent(b_y, b_x);
+                // if is_parent {
+                //     let is_parent = self.env.lock().block_tree.is_parent(b_z, b_y);
+                //     if is_parent {
+                      if proofcom.clone().is_formal_proof(proof_com.node, proof_com.prooftype){
+                        if proofval.clone().is_temp_proof(proof_com.node, ProofType::Val(m_valid)){
                         trace!("{}: enter DECIDE phase", id);
                         // DECIDE phase on b_z / Finalize b_z
-                        let finalized_blocks = self.env.lock().block_tree.finalize(b_z);
+                        // let finalized_blocks = self.env.lock().block_tree.finalize(b_z);
+                        let finalized_blocks = self.env.lock().block_tree.finalize(proofcom.node);
                         // onCommit
                         if let Some(tx) = finalized_block_tx.as_ref() {
                             for block in finalized_blocks {
@@ -756,7 +807,8 @@ impl ConsensusVoter {
                         }
                       }
                     }
-                }
+                //   }
+                // }
 
                 trace!("{}: view add one", id);
                 // Finish the view
@@ -783,6 +835,28 @@ impl ConsensusVoter {
                     self.state.lock().set_best_view(view);
                   }
                 }
+            }
+            Message::Join => {
+              if self.leadership.is_in_L(id) {
+                let m_high = self.state.lock().m_high.clone();
+                let m_valid = self.state.lock().m_valid.clone();
+                let membership = self.state.lock().membership.clone();
+                let pool_m_join = self.state.lock().pool_m_join.clone();
+                let is_in_mmtable = self.state.lock().exists_with_a_gt_zero(&from);
+                if !m_high.contains_voter(&from) && !m_valid.contains_voter(&from) && !membership.contains_voter(&from) && !pool_m_join.contains(&from) && !is_in_mmtable{
+                  self.state.lock().pool_m_join.push(from);
+                  println!("{} processing valid join request from: {}", id, from);
+                }
+              }
+            }
+            Message::Leave => {
+              if self.leadership.is_in_L(id) {
+                let membership = self.state.lock().membership.clone();
+                let pool_m_leave = self.state.lock().pool_m_join.clone();
+                if membership.contains_voter(&from) && !pool_m_leave.contains(&from) {
+                  self.state.lock().pool_m_leave.push(from);
+                }
+              }
             }
             Message::NewView(high_proof, digest, author, signature) => {
                 self.update_proof_pre(high_proof);
@@ -819,11 +893,16 @@ impl ConsensusVoter {
 
         while let Some(pkg) = rx.recv().await {
             let view = pkg.view.unwrap();
+            let configuration = pkg.configuration.unwrap();
             let current_view = self.state.lock().view;
+            // if view == 1 {
+            //   println!("view 1 pkg {:?}", pkg);
+            // }
+            let current_conf = self.state.lock().configuration;
 
             if !buffer.is_empty() {
                 while let Some((&view, _)) = buffer.first_key_value() {
-                    if view < current_view - 1 {
+                    if view < current_view - 1 || configuration + 1 < current_conf {
                         // Stale view
                         buffer.pop_first();
                         trace!("{}: stale view: {}", id, view);
@@ -854,9 +933,13 @@ impl ConsensusVoter {
             }
 
             let current_view = self.state.lock().view;
+            let current_conf = self.state.lock().configuration;
+            let from = pkg.from;
+            let current_mem = self.state.lock().membership.clone();
 
-            if view < current_view - 1 {
+            if (view < current_view - 1 || configuration + 1 < current_conf) && current_mem.contains_voter(&from) {
                 // Stale view, drop it.
+                // trace!("stale pkg: {:?}", pkg);
                 continue;
             } else if view > current_view {
                 // Received a message from future view, buffer it.
@@ -890,6 +973,7 @@ impl ConsensusVoter {
         loop {
             let tx = self.env.lock().network.get_sender();
             let view = self.state.lock().view;
+            let configuration = self.state.lock().configuration;
 
             if self.leadership.get_leader(view) == id {
                 tracing::trace!("{}: start as leader in view: {}", id, view);
@@ -903,7 +987,11 @@ impl ConsensusVoter {
                 // onPropose
                 let proof_new = self.state.lock().proof_new.clone();
                 let prooflist = self.state.lock().prooflist.clone();
-                let pkg = Self::new_key_block(self.env.to_owned(), view, proof_new, prooflist, id);
+                let join_reqm = self.state.lock().pool_m_join.clone();
+                self.state.lock().pool_m_join = Vec::new();
+                let leave_reqm = self.state.lock().pool_m_leave.clone();
+                self.state.lock().pool_m_leave = Vec::new();
+                let pkg = Self::new_key_block(self.env.to_owned(), view, configuration, proof_new, prooflist, id, join_reqm, leave_reqm);
                 tracing::trace!("{}: leader propose block in view: {}", id, view);
                 tx.send(pkg).await.unwrap();
             }
@@ -939,8 +1027,9 @@ impl ConsensusVoter {
             trace!("{}: pacemaker awake", id);
 
             // If last vote is received later then 1s ago, then continue to sleep.
+            let is_in_formal_conf = self.state.lock().membership.contains_voter(&id);
             let current_view = self.state.lock().view;
-            if current_view != past_view {
+            if current_view != past_view || !is_in_formal_conf{
                 multiplexer = 1;
                 continue;
             }
@@ -955,7 +1044,8 @@ impl ConsensusVoter {
             // otherwise, try send a new-view message to nextleader
             let (next_leader, next_leader_view) = self.get_next_leader();
             trace!("{} send new_view to {}", id, next_leader);
-            let pkg = self.new_new_view(next_leader_view, next_leader);
+            let configuration = self.state.lock().configuration;
+            let pkg = self.new_new_view(next_leader_view, configuration, next_leader);
             tx.send(pkg).await.unwrap();
 
             self.state.lock().view = next_leader_view;
@@ -963,14 +1053,14 @@ impl ConsensusVoter {
         }
     }
 
-    fn new_new_view(&self, view: u64, next_leader: PublicKey) -> NetworkPackage {
+    fn new_new_view(&self, view: u64, configuration: u64, next_leader: PublicKey) -> NetworkPackage {
         // latest Vote
         let digest = self.env.lock().block_tree.latest;
         let id = self.config.get_id();
         let signature = self.config.get_private_key().sign(&digest);
         let new_view =
             Message::NewView(self.state.lock().proof_pre.clone(), digest, id, signature);
-        Self::package_message(self.state.lock().id, new_view, view, Some(next_leader))
+        Self::package_message(self.state.lock().id, new_view, view, configuration, Some(next_leader))
     }
 
     // -> (leaderId, view)
