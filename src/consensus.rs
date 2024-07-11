@@ -13,11 +13,12 @@ use std::{
 };
 
 use tokio::sync::{mpsc::Sender, Notify};
+use tokio::time::{sleep, Duration};
 
 use serde::{Deserialize, Serialize};
 
 use parking_lot::Mutex;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace, warn, info};
 
 use crate::{
     data::{Block, BlockTree},
@@ -129,10 +130,11 @@ impl VoterState {
         }
         let view_map = self.votes.entry(msg_view).or_default();
         let voters = view_map.entry(block_hash).or_default();
+        let configuration = self.configuration;
         // TODO: check if voter_id is already in voters
         voters.push(voter_id);
 
-        if voters.len() == self.hisconf.get(&0).unwrap().threshold() {
+        if voters.len() >= self.hisconf.get(&configuration).unwrap().threshold() {
             trace!(
                 "{}: Vote threshold {} is ready, current: {}",
                 self.id,
@@ -146,7 +148,7 @@ impl VoterState {
                 self.id,
                 msg_view,
                 self.view,
-                self.hisconf.get(&0).unwrap().threshold()
+                self.hisconf.get(&configuration).unwrap().threshold()
             );
             None
         }
@@ -431,7 +433,7 @@ impl Voter {
         }
     }
 
-    pub(crate) async fn start(&mut self, mode: usize) {
+    pub(crate) async fn start(&mut self, mode: usize, delay_time: usize) {
         // Start from view 0, and keep increasing the view number
         let proof_pre = self.env.lock().block_tree.genesis().0.justify.clone();
         let voters = self.env.lock().imembership.to_owned();
@@ -475,7 +477,7 @@ impl Voter {
         if mode == 1 {
           let self_clone = self.clone();
           tokio::spawn(async move{ 
-          std::thread::sleep_ms(2000);
+          sleep(Duration::from_millis(delay_time as u64)).await;
           self_clone.test_join().await;
         });
         }
@@ -503,7 +505,7 @@ impl Voter {
           message: Message::Join,
           signature: 0,
       };
-      println!("{} sending join request pkg {:?} to: {}", self.id, pkg, to);
+      info!("MEMBERSHIP REQUEST INITIATED =====> {} sending join request to: {}", self.id, to);
       tx.send(pkg).await.unwrap();
     }
 }
@@ -652,23 +654,30 @@ impl ConsensusVoter {
         finalized_block_tx: &Option<Sender<(Block, BlockType, u64)>>,
     ) {
         let view = pkg.view.unwrap();
+        let configuration = pkg.view.unwrap();
         let message = pkg.message;
         let from = pkg.from;
         let current_view = self.state.lock().view;
         let current_conf = self.state.lock().configuration;
         match message {
             Message::Propose(block, prooflist) => {
+                // trace!("{} receiving propose in {}",id, view);
                 if view < self.state.lock().view {
                     return;
                 }
                 let hash = block.hash();
+                let join_reqm = block.join_reqm.clone();
+                // if(block.join_reqm.len()>0){
+                //   println!("{} processing membership request.", id);
+                // }
 
                 // WARN: As a POC, we suppose all the blocks are valid by application logic.
                 block.verify().unwrap();
                 let proof_com = self.state.lock().proof_com.clone();
                 let proof_pre = self.state.lock().proof_pre.clone();
-                let m_high = self.state.lock().m_high.get_voters().clone();
-                let m_valid = self.state.lock().m_valid.get_voters().clone();
+                let m_high = self.state.lock().m_high.clone();
+                let m_valid = self.state.lock().m_valid.clone();
+                let membership = self.state.lock().membership.clone();
                 let mut proofcon2 = Proof::default();
                 let mut proofcom = Proof::default();
                 let mut proofhigh = Proof::default();
@@ -757,6 +766,11 @@ impl ConsensusVoter {
                 trace!("{}: enter PRE-COMMIT phase", id);
                 // PRE-COMMIT phase on b_x
                 self.update_proof_pre(block_justify);
+                if join_reqm.len() != 0 {
+                  for pk in join_reqm {
+                     self.state.lock().m_high.add_voter(pk);
+                  }
+                }
 
                 let larger_view = self
                     .env
@@ -773,8 +787,9 @@ impl ConsensusVoter {
                     // COMMIT phase on b_y
                     // trace!("{}: proof_pre :{:?} proof_con2 : {:?}", id, proof_pre, proofcon2);
                     if proofcon2.clone().is_formal_proof(proof_pre.node, proof_pre.prooftype){
-                      if proofhigh.clone().is_temp_proof(proof_pre.node, ProofType::High(m_high)){
+                      if proofhigh.clone().is_temp_proof(proof_pre.node, ProofType::High(m_high.get_voters())){
                         self.state.lock().proof_com = proofcon2.clone();
+                        self.state.lock().m_valid = m_high.clone();
                         trace!("{}: update proof_com from :{:?} to : {:?}", id, proof_com, proofcon2);
                       }
                     }
@@ -794,8 +809,14 @@ impl ConsensusVoter {
                 //     let is_parent = self.env.lock().block_tree.is_parent(b_z, b_y);
                 //     if is_parent {
                       if proofcom.clone().is_formal_proof(proof_com.node, proof_com.prooftype){
-                        if proofval.clone().is_temp_proof(proof_com.node, ProofType::Val(m_valid)){
+                        if proofval.clone().is_temp_proof(proof_com.node, ProofType::Val(m_valid.get_voters())){
                         trace!("{}: enter DECIDE phase", id);
+                        if membership.get_voters() != m_valid.get_voters() {
+                         self.state.lock().membership = m_valid.clone();
+                          self.state.lock().configuration = current_conf + 1;
+                         self.state.lock().hisconf.insert(current_conf + 1, m_valid);
+                         info!("MEMBERSHIP REQUEST COMMITTED =====> {}: Enter configuration {}, membership: {:?}", id, current_conf + 1, self.state.lock().membership.get_voters());
+                        }
                         // DECIDE phase on b_z / Finalize b_z
                         // let finalized_blocks = self.env.lock().block_tree.finalize(b_z);
                         let finalized_blocks = self.env.lock().block_tree.finalize(proofcom.node);
@@ -820,6 +841,7 @@ impl ConsensusVoter {
                 // onReceiveVote
                 let proof = self.state.lock().add_vote(view, block_hash, from);
                 let prooflist = self.state.lock().create_prooflist(view, from, 4);
+                let proof_new = self.state.lock().proof_new.clone();
                 // verify signature
                 author.verify(&block_hash, &signature).unwrap();
 
@@ -827,12 +849,14 @@ impl ConsensusVoter {
                 //     self.update_proof_pre(proof);
                 //     self.state.lock().set_best_view(view);
                 // }
-                if let Some(proof) = proof {
+                if let Some(proof) = proof{
                   if let Some(prooflist) = prooflist{
+                    if proof.view != proof_new.view {
                     // self.update_proof_pre(proof);
                     self.update_proof_new(proof);
                     self.state.lock().prooflist = prooflist;
                     self.state.lock().set_best_view(view);
+                    }
                   }
                 }
             }
@@ -845,7 +869,7 @@ impl ConsensusVoter {
                 let is_in_mmtable = self.state.lock().exists_with_a_gt_zero(&from);
                 if !m_high.contains_voter(&from) && !m_valid.contains_voter(&from) && !membership.contains_voter(&from) && !pool_m_join.contains(&from) && !is_in_mmtable{
                   self.state.lock().pool_m_join.push(from);
-                  println!("{} processing valid join request from: {}", id, from);
+                  info!("MEMBERSHIP REQUEST HANDLED =====> {} processing valid join request from: {}", id, from);
                 }
               }
             }
@@ -891,7 +915,7 @@ impl ConsensusVoter {
         // Initialize as 0, since we voted for genesis block.
         let mut voted_view = 0;
 
-        while let Some(pkg) = rx.recv().await {
+        while let Some(pkg) = rx.recv().await{
             let view = pkg.view.unwrap();
             let configuration = pkg.configuration.unwrap();
             let current_view = self.state.lock().view;

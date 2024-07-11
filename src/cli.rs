@@ -64,6 +64,8 @@ pub(crate) struct Cli {
 #[derive(Parser, Debug)]
 pub(crate) enum Commands {
     /// Run the node within memory network.
+    /// Member join test: initial_number replicas forming the initial configuration.  
+    /// The remaining replicas will be joined later by sending join requests.
     MemoryTestJoin {
         /// Number of nodes (universe).
         #[arg(short, long, default_value_t = 4)]
@@ -72,6 +74,11 @@ pub(crate) enum Commands {
         /// Number of nodes (M0).
         #[arg(short, long, default_value_t = 4)]
         initial_number: usize,
+
+        /// Sequential join (replicas not in the initial configuration send join requests at 5s intervals).
+        /// Set to false to have replicas send join requests at the same time.
+        #[arg(short, long, default_value_t = true)]
+        sequential_join: bool,
     },
 
     /// Run the node in memory network with some nodes are failure.

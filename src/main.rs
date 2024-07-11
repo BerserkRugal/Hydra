@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     match cli.command {
-        Some(Commands::MemoryTestJoin { number, initial_number }) => {
+        Some(Commands::MemoryTestJoin { number, initial_number, sequential_join }) => {
             let voter_set: Vec<_> = generate_keypairs(number);
             let inum = min(number, initial_number);
             let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
@@ -99,10 +99,17 @@ async fn main() -> Result<()> {
             nodes.into_iter().for_each(|node| {
                 node.spawn_run();
             });
-
-            rest_nodes.into_iter().for_each(|node| {
-                node.spawn_run_join_test();
-            });
+            if sequential_join == false {
+               rest_nodes.into_iter().for_each(|node| {
+                  node.spawn_run_join_test(5000);
+               });
+            }else{
+              let mut delay_time = 5000;
+              rest_nodes.into_iter().for_each(|node| {
+                node.spawn_run_join_test(delay_time);
+                delay_time = delay_time + 5000;
+             });
+            }
 
             let _ = tokio::join!(handle);
         }
