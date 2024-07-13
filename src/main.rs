@@ -6,7 +6,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    cmp::min,
+    cmp::{min,max},
 };
 
 use clap::Parser;
@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
             let voter_set: Vec<_> = generate_keypairs(number);
             let inum = min(number, initial_number);
             let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
+            let inum = max(inum, lnum);
             let initial_set: Vec<_> = voter_set.iter().take(inum).cloned().collect();
             let rest_set: Vec<_> = voter_set.iter().filter(|&element| !initial_set.contains(element)).cloned().collect();
             let l_set: Vec<_> = voter_set.iter().take(lnum).cloned().collect();
@@ -101,18 +102,200 @@ async fn main() -> Result<()> {
             });
             if sequential_join == false {
                rest_nodes.into_iter().for_each(|node| {
-                  node.spawn_run_join_test(5000);
+                  node.spawn_run_membership_test(1,5000);
                });
             }else{
               let mut delay_time = 5000;
               rest_nodes.into_iter().for_each(|node| {
-                node.spawn_run_join_test(delay_time);
+                node.spawn_run_membership_test(1, delay_time);
                 delay_time = delay_time + 5000;
              });
             }
 
             let _ = tokio::join!(handle);
         }
+        Some(Commands::MemoryTestLeave { number, leave_number, sequential_leave }) => {
+            let voter_set: Vec<_> = generate_keypairs(number);
+            let inum = min(number, leave_number);
+            let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
+            let inum = max(number-inum, lnum);
+            let final_set: Vec<_> = voter_set.iter().take(inum).cloned().collect();
+            let rest_set: Vec<_> = voter_set.iter().filter(|&element| !final_set.contains(element)).cloned().collect();
+            let l_set: Vec<_> = voter_set.iter().take(lnum).cloned().collect();
+            let genesis = data::Block::genesis();
+
+            let mut network = MemoryNetwork::new();
+            config.test_mode.memory_test_leave = true;
+
+            // Mock peers
+            config.override_voter_set(&VoterSet::new(
+                voter_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_initial_members(&VoterSet::new(
+              voter_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_l(&VoterSet::new(
+              l_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+
+
+            // Prepare the environment.
+            let nodes: Vec<_> = final_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();
+
+             let rest_nodes: Vec<_> = rest_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();    
+
+            // Boot up the network.
+            let handle = tokio::spawn(async move {
+                network.dispatch().await?;
+                Ok::<_, anyhow::Error>(())
+            });
+
+            nodes.get(0).unwrap().metrics();
+
+            // Run the nodes.
+            nodes.into_iter().for_each(|node| {
+                node.spawn_run();
+            });
+            if sequential_leave == false {
+               rest_nodes.into_iter().for_each(|node| {
+                  node.spawn_run_membership_test(2, 5000);
+               });
+            }else{
+              let mut delay_time = 5000;
+              rest_nodes.into_iter().for_each(|node| {
+                node.spawn_run_membership_test(2, delay_time);
+                delay_time = delay_time + 5000;
+             });
+            }
+
+            let _ = tokio::join!(handle);
+         }
+         Some(Commands::MemoryTestHybrid { number, initial_number, leave_number, sequential}) => {
+            let voter_set: Vec<_> = generate_keypairs(number);
+            let inum = min(number, initial_number);
+            let jnum = min(initial_number, leave_number);
+            let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
+            let inum = max(inum, lnum);
+            let jnum = max(initial_number-jnum, lnum);
+            let initial_set: Vec<_> = voter_set.iter().take(inum).cloned().collect();
+            let fixed_set: Vec<_> = initial_set.iter().take(jnum).cloned().collect();
+            let leave_set: Vec<_> = initial_set.iter().filter(|&element| !fixed_set.contains(element)).cloned().collect();
+            let join_set: Vec<_> = voter_set.iter().filter(|&element| !initial_set.contains(element)).cloned().collect();
+            let l_set: Vec<_> = voter_set.iter().take(lnum).cloned().collect();
+            let genesis = data::Block::genesis();
+
+            let mut network = MemoryNetwork::new();
+            config.test_mode.memory_test_hybrid = true;
+
+            // Mock peers
+            config.override_voter_set(&VoterSet::new(
+                voter_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_initial_members(&VoterSet::new(
+              initial_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_l(&VoterSet::new(
+              l_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+
+
+            // Prepare the environment.
+            let fixed_nodes: Vec<_> = fixed_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();
+
+             let join_nodes: Vec<_> = join_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();
+                
+             let leave_nodes: Vec<_> = leave_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();    
+
+            // Boot up the network.
+            let handle = tokio::spawn(async move {
+                network.dispatch().await?;
+                Ok::<_, anyhow::Error>(())
+            });
+
+            fixed_nodes.get(0).unwrap().metrics();
+
+            // Run the nodes.
+            fixed_nodes.into_iter().for_each(|node| {
+                node.spawn_run();
+            });
+            if sequential == false {
+               let mut delay_time = 5000;
+               join_nodes.into_iter().for_each(|node| {
+                  node.spawn_run_membership_test(3, delay_time);
+                  delay_time = delay_time + 5000;
+               });
+               delay_time = 5000;
+               leave_nodes.into_iter().for_each(|node| {
+                node.spawn_run_membership_test(4, delay_time);
+                delay_time = delay_time + 5000;
+             });
+            }else{
+              let mut delay_time = 5000;
+               join_nodes.into_iter().for_each(|node| {
+                  node.spawn_run_membership_test(3, delay_time);
+                  delay_time = delay_time + 10000;
+               });
+               delay_time = 10000;
+               leave_nodes.into_iter().for_each(|node| {
+                node.spawn_run_membership_test(4, delay_time);
+                delay_time = delay_time + 10000;
+             });
+            }
+
+            let _ = tokio::join!(handle);
+
+
+         }
         Some(Commands::FailTest { number }) => {
             let total = number * 3 + 1;
             let voter_set: Vec<_> = generate_keypairs(total);

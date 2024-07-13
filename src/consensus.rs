@@ -32,6 +32,7 @@ pub(crate) enum Message {
     // Contain the last vote of the sender, so that
     // it can tolerate more failures.
     NewView(Proof, Digest, PublicKey, Signature),
+    // AutoTrans(Block, Proof),
     Join,
     Leave,
 }
@@ -154,7 +155,7 @@ impl VoterState {
         }
     }
 
-        // return whether a new proof formed.
+        // return whether a new prooflist formed.
     pub(crate) fn create_prooflist(
         &mut self,
         msg_view: u64,
@@ -434,7 +435,7 @@ impl Voter {
     }
 
     pub(crate) async fn start(&mut self, mode: usize, delay_time: usize) {
-        // Start from view 0, and keep increasing the view number
+        // Start from view 0 and configuration 0, and keep increasing the view number
         let proof_pre = self.env.lock().block_tree.genesis().0.justify.clone();
         let voters = self.env.lock().imembership.to_owned();
         let mut hisconf = HashMap::new();
@@ -474,12 +475,47 @@ impl Voter {
             pacemaker.run_as_pacemaker().await;
         });
         
-        if mode == 1 {
+        if mode == 1 { //
           let self_clone = self.clone();
           tokio::spawn(async move{ 
           sleep(Duration::from_millis(delay_time as u64)).await;
-          self_clone.test_join().await;
+          let view = state.lock().view;
+          self_clone.test_join(view).await;
+          // println!("view: {}<=============", state.lock().view);
         });
+        } else if mode == 2 {
+          let self_clone = self.clone();
+          tokio::spawn(async move{ 
+          sleep(Duration::from_millis(delay_time as u64)).await;
+          let view = state.lock().view;
+          let configuration = state.lock().configuration;
+          self_clone.test_leave(view, configuration).await;
+          // println!("view: {}<=============", state.lock().view);
+        });
+        } else if mode == 3 {
+          let self_clone = self.clone();
+          tokio::spawn(async move{ 
+          sleep(Duration::from_millis(delay_time as u64)).await;
+          let view = state.lock().view;
+          self_clone.test_join(view).await;
+          sleep(Duration::from_millis(15000)).await;
+          let view = state.lock().view;
+          let configuration = state.lock().configuration;
+          self_clone.test_leave(view, configuration).await;
+        });
+        
+        } else if mode == 4 {
+          let self_clone = self.clone();
+          tokio::spawn(async move{ 
+          sleep(Duration::from_millis(delay_time as u64)).await;
+          let view = state.lock().view;
+          let configuration = state.lock().configuration;
+          self_clone.test_leave(view, configuration).await;
+          sleep(Duration::from_millis(15000)).await;
+          let view = state.lock().view;
+          self_clone.test_join(view).await;
+        });
+        
         }
         let (r1, r2, r3) = tokio::join!(handler1, handler2, handler3);
         
@@ -490,13 +526,14 @@ impl Voter {
         
     }
 
-    pub(crate) async fn test_join(&self) {
+    pub(crate) async fn test_join(&self, view: u64) {
         let (mut tx) = {
             let mut env = self.env.lock();
             let tx = env.network.get_sender();
             (tx)
         };
-        let to = self.config.get_l_set().get_voters().clone().pop().unwrap();
+        let l_set = self.config.get_l_set().get_voters();
+        let to = l_set[view as usize % l_set.len()]; // Simulation of random selection
         let pkg = NetworkPackage {
           from: self.id,
           to: Some(to),
@@ -506,6 +543,26 @@ impl Voter {
           signature: 0,
       };
       info!("MEMBERSHIP REQUEST INITIATED =====> {} sending join request to: {}", self.id, to);
+      tx.send(pkg).await.unwrap();
+    }
+
+    pub(crate) async fn test_leave(&self, view: u64, configuration: u64) {
+        let (mut tx) = {
+            let mut env = self.env.lock();
+            let tx = env.network.get_sender();
+            (tx)
+        };
+        let l_set = self.config.get_l_set().get_voters();
+        let to = l_set[view as usize % l_set.len()]; // Simulation of random selection
+        let pkg = NetworkPackage {
+          from: self.id,
+          to: Some(to),
+          view: Some(view),
+          configuration: Some(configuration),
+          message: Message::Leave,
+          signature: 0,
+      };
+      info!("MEMBERSHIP REQUEST INITIATED =====> {} sending leave request to: {}", self.id, to);
       tx.send(pkg).await.unwrap();
     }
 }
@@ -667,6 +724,7 @@ impl ConsensusVoter {
                 }
                 let hash = block.hash();
                 let join_reqm = block.join_reqm.clone();
+                let leave_reqm = block.leave_reqm.clone();
                 // if(block.join_reqm.len()>0){
                 //   println!("{} processing membership request.", id);
                 // }
@@ -771,6 +829,11 @@ impl ConsensusVoter {
                      self.state.lock().m_high.add_voter(pk);
                   }
                 }
+                if leave_reqm.len() != 0 {
+                  for pk in leave_reqm {
+                     self.state.lock().m_high.remove_voter(&pk);
+                  }
+                }
 
                 let larger_view = self
                     .env
@@ -814,8 +877,10 @@ impl ConsensusVoter {
                         if membership.get_voters() != m_valid.get_voters() {
                          self.state.lock().membership = m_valid.clone();
                           self.state.lock().configuration = current_conf + 1;
-                         self.state.lock().hisconf.insert(current_conf + 1, m_valid);
-                         info!("MEMBERSHIP REQUEST COMMITTED =====> {}: Enter configuration {}, membership: {:?}", id, current_conf + 1, self.state.lock().membership.get_voters());
+                         self.state.lock().hisconf.insert(current_conf + 1, m_valid.clone());
+                         if(m_valid.contains_voter(&id)){
+                          info!("MEMBERSHIP REQUEST COMMITTED =====> {}: Enter configuration {}, membership: {:?}", id, current_conf + 1, self.state.lock().membership.get_voters());
+                         }
                         }
                         // DECIDE phase on b_z / Finalize b_z
                         // let finalized_blocks = self.env.lock().block_tree.finalize(b_z);
@@ -879,6 +944,7 @@ impl ConsensusVoter {
                 let pool_m_leave = self.state.lock().pool_m_join.clone();
                 if membership.contains_voter(&from) && !pool_m_leave.contains(&from) {
                   self.state.lock().pool_m_leave.push(from);
+                  info!("MEMBERSHIP REQUEST HANDLED =====> {} processing valid leave request from: {}", id, from);
                 }
               }
             }

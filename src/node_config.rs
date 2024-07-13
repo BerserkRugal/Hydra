@@ -105,6 +105,10 @@ pub(crate) struct TestMode {
     #[serde(default)]
     pub(crate) memory_test_join: bool,
     #[serde(default)]
+    pub(crate) memory_test_leave: bool,
+    #[serde(default)]
+    pub(crate) memory_test_hybrid: bool,
+    #[serde(default)]
     pub(crate) fault_tolerance_test: bool,
 }
 

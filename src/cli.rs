@@ -64,8 +64,9 @@ pub(crate) struct Cli {
 #[derive(Parser, Debug)]
 pub(crate) enum Commands {
     /// Run the node within memory network.
-    /// Member join test: initial_number replicas forming the initial configuration.  
-    /// The remaining replicas will be joined later by sending join requests.
+    /// Member join test: 'initial_number' replicas forming the initial configuration.  
+    /// The remaining replicas will send join requests to join later.
+    /// Please keep the |L|<=initial_number<=number
     MemoryTestJoin {
         /// Number of nodes (universe).
         #[arg(short, long, default_value_t = 4)]
@@ -75,12 +76,52 @@ pub(crate) enum Commands {
         #[arg(short, long, default_value_t = 4)]
         initial_number: usize,
 
-        /// Sequential join (replicas not in the initial configuration send join requests at 5s intervals).
+        /// Sequential join (replicas not in the initial configuration send join requests at 5s intervals one-by-one).
         /// Set to false to have replicas send join requests at the same time.
-        #[arg(short, long, default_value_t = true)]
+        #[arg(short, long, default_value_t = false)]
         sequential_join: bool,
     },
+    /// Run the node within memory network.
+    /// Member leave test: 'number' replicas forming the initial configuration.  
+    /// 'leave_number' replicas will leave later by sending leave requests.
+    /// Please keep the number-leave_number>=|L|
+    MemoryTestLeave {
+      /// Number of nodes (universe, also M0).
+      #[arg(short, long, default_value_t = 4)]
+      number: usize,
 
+      /// Number of the leaving nodes
+      #[arg(short, long, default_value_t = 0)]
+      leave_number: usize,
+
+      /// Sequential leave ('leave_number' replicas send leave requests at 5s intervals one-by-one).
+      /// Set to false to have replicas send leave requests at the same time.
+      #[arg(short, long, default_value_t = false)]
+      sequential_leave: bool,
+    },
+    /// Run the node within memory network.
+    /// 'initial_number' replicas forming the initial configuration.
+    /// The remaining replicas will send join requests to join later，and then leave again 15s after joining.
+    /// 'leave_number' replicas will leave later by sending leave requests，and then join again 15s after leaving.
+    /// Please keep |L|<=initial_number<=number and initial_number-leave_number>=|L|
+    MemoryTestHybrid {
+      /// Number of nodes (universe).
+      #[arg(short, long, default_value_t = 4)]
+      number: usize,
+
+      /// Number of nodes (M0).
+      #[arg(short, long, default_value_t = 4)]
+      initial_number: usize,
+
+      /// Number of the leaving nodes
+      #[arg(short, long, default_value_t = 0)]
+      leave_number: usize,
+
+      /// Sequential (replicas send membership requests at 5s intervals one-by-one).
+      /// Set to false to have at least two replicas send a join request and a leave request at the same time.
+      #[arg(short, long, default_value_t = false)]
+      sequential: bool,
+    },
     /// Run the node in memory network with some nodes are failure.
     FailTest {
         /// Number of failures.

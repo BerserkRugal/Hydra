@@ -45,13 +45,29 @@ impl Node {
         })
     }
 
-    pub(crate) fn spawn_run_join_test(mut self, delay_time: usize) -> JoinHandle<()> {
+  //   pub(crate) fn spawn_run_join_test(mut self, delay_time: usize) -> JoinHandle<()> {
+  //       info!("Node config: {:#?}", self.config);
+  //       println!("Voter is running: {}", self.config.get_id());
+  //       tokio::spawn(async move {
+  //           self.voter.start(1,delay_time).await;
+  //       })
+  //   }
+
+  //   pub(crate) fn spawn_run_leave_test(mut self, delay_time: usize) -> JoinHandle<()> {
+  //     info!("Node config: {:#?}", self.config);
+  //     println!("Voter is running: {}", self.config.get_id());
+  //     tokio::spawn(async move {
+  //         self.voter.start(2,delay_time).await;
+  //     })
+  // }
+    pub(crate) fn spawn_run_membership_test(mut self, mode: usize, delay_time: usize) -> JoinHandle<()> {
         info!("Node config: {:#?}", self.config);
         println!("Voter is running: {}", self.config.get_id());
         tokio::spawn(async move {
-            self.voter.start(1,delay_time).await;
+            self.voter.start(mode,delay_time).await;
         })
     }
+
 
     /// Enable and spawn a metrics.
     pub(crate) fn metrics(&self) {
