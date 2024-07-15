@@ -109,7 +109,7 @@ pub(crate) struct TestMode {
     #[serde(default)]
     pub(crate) memory_test_hybrid: bool,
     #[serde(default)]
-    pub(crate) fault_tolerance_test: bool,
+    pub(crate) fault_test: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]

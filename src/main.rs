@@ -296,26 +296,41 @@ async fn main() -> Result<()> {
 
 
          }
-        Some(Commands::FailTest { number }) => {
-            let total = number * 3 + 1;
-            let voter_set: Vec<_> = generate_keypairs(total);
+        Some(Commands::FailTest { number, fault }) => {
+            // let total = number * 3 + 1;
+            // let voter_set: Vec<_> = generate_keypairs(total);
+            let voter_set: Vec<_> = generate_keypairs(number);
+            let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
+            let l_set: Vec<_> = voter_set.iter().take(lnum).cloned().collect();
+            let f = min(number-lnum, fault);
             let genesis = data::Block::genesis();
             let mut network = MemoryNetwork::new();
 
             // Mock peers
             config.override_voter_set(&VoterSet::new(
-                voter_set.iter().map(|(pk, _)| *pk).collect(),
+                voter_set.clone().iter().map(|(pk, _)| *pk).collect(),
             ));
-
+            config.override_initial_members(&VoterSet::new(
+              voter_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_l(&VoterSet::new(
+              l_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.test_mode.fault_test = true;
             // Prepare the environment.
             let nodes: Vec<_> = voter_set
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, (p, sec))| {
-                    if idx % 3 == 1 {
+                    // if idx % 3 == 1 {
+                    //     // Fail the node.
+                    //     None
+                    // } 
+                    if idx >= number - f {
                         // Fail the node.
                         None
-                    } else {
+                    } 
+                    else {
                         let adaptor = network.register(*p);
                         Some(Node::new(
                             config.clone_with_keypair(*p, sec.clone()),

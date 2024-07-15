@@ -48,7 +48,8 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) mempool_size: Option<usize>,
 
-    /// Pacemaker timeout.
+    /// Pacemaker timeout, default value is 5000ms.
+    /// Configuration auto-transition will start when the timer is half over.
     #[arg(long)]
     pub(crate) timeout: Option<usize>,
 
@@ -124,9 +125,13 @@ pub(crate) enum Commands {
     },
     /// Run the node in memory network with some nodes are failure.
     FailTest {
+        /// Number of nodes.
+        #[arg(short, long, default_value_t = 4)]
+        number: usize,
+
         /// Number of failures.
         #[arg(short, long, default_value_t = 1)]
-        number: usize,
+        fault: usize,
     },
 
     /// Generate all configs for a single test.

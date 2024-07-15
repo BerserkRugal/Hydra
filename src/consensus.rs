@@ -4,7 +4,7 @@ use crate::{
     node_config::NodeConfig,
 };
 use std::{
-    collections::{BTreeMap, HashMap, hash_map::Entry},
+    collections::{BTreeMap, HashMap, hash_map::Entry, HashSet},
     slice::Iter,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -32,7 +32,8 @@ pub(crate) enum Message {
     // Contain the last vote of the sender, so that
     // it can tolerate more failures.
     NewView(Proof, Digest, PublicKey, Signature),
-    // AutoTrans(Block, Proof),
+    AutoTrans(Block, Proof),
+    AutoVote(Digest, PublicKey, Signature),
     Join,
     Leave,
 }
@@ -46,6 +47,7 @@ pub(crate) struct VoterState {
     pub membership: VoterSet,
     pub m_high: VoterSet,
     pub m_valid: VoterSet,
+    pub m_auto: VoterSet,
     pub hisconf: HashMap<u64, VoterSet>,
     //pub membership: Vec<PublicKey>,
     pub threshold: usize,
@@ -74,6 +76,7 @@ impl VoterState {
             membership: membership.to_owned(),
             m_high: membership.to_owned(),
             m_valid: membership,
+            m_auto: VoterSet::new(Vec::new()),
             hisconf,
             threshold,
             proof_pre: proof_pre.to_owned(),
@@ -264,6 +267,78 @@ impl VoterState {
         } else {
           return None;
         }
+    }
+
+    pub(crate) fn auto_detect(
+      &mut self,
+      view: u64,
+      block_hash: Digest,
+    ) -> Vec<PublicKey> {
+        let mut rset = Vec::new();
+        let view_map = self.votes.entry(view).or_default();
+        let voters = view_map.entry(block_hash).or_default();
+        let configuration = self.configuration;
+        if let Some(hismem) = self.hisconf.get(&configuration){
+         if voters.len() < hismem.threshold() {
+            for pk in hismem.get_voters() {
+              if !voters.contains(&pk) {
+                rset.push(pk)
+              }
+            }
+        }
+      }
+      match self.proof_pre.prooftype {
+            ProofType::Con1(value) => {
+              if self.hisconf.contains_key(&value){
+                if let Some(keys) = self.hisconf.get(&value){
+                    let voters = view_map.entry(self.proof_pre.node).or_default();
+                    if voters.len() < keys.threshold() {
+                      for pk in keys.get_voters() {
+                        if !voters.contains(&pk) {
+                          rset.push(pk)
+                        }
+                      }
+                    } 
+                }
+              }
+            }
+            _ => {println!("proof_pre do not exist or it is not a Con1 type proof.")}
+        }
+        match self.proof_com.prooftype {
+            ProofType::Con2(value) => {
+              if self.hisconf.contains_key(&value){
+                if let Some(keys) = self.hisconf.get(&value){
+                    let voters = view_map.entry(self.proof_com.node).or_default();
+                    if voters.len() < keys.threshold() {
+                      for pk in keys.get_voters() {
+                        if !voters.contains(&pk) {
+                          rset.push(pk)
+                        }
+                      }
+                    } 
+                }
+              }
+            }
+            _ => {trace!("proof_com do not exist or it is not a Con2 type proof.")}
+        }
+          let voters = view_map.entry(Digest::high()).or_default();
+          if voters.len() < self.m_high.threshold() {
+            for pk in self.m_high.get_voters() {
+              if !voters.contains(&pk) {
+                rset.push(pk)
+              }
+            }
+           }
+           let voters = view_map.entry(Digest::val()).or_default();
+           if voters.len() < self.m_valid.threshold() {
+            for pk in self.m_valid.get_voters() {
+              if !voters.contains(&pk) {
+                rset.push(pk)
+              }
+            }
+          }
+      let set: HashSet<_> = rset.iter().cloned().collect();
+      set.into_iter().collect()
     }
 
     pub(crate) fn set_best_view(&mut self, view: u64) {
@@ -598,8 +673,8 @@ impl Leadership {
             .to_owned()
     }
 
-    fn is_in_L(&self, replica: PublicKey) -> bool {
-        self.l_set.contains_voter(&replica)
+    fn is_in_L(&self, replica: &PublicKey) -> bool {
+        self.l_set.contains_voter(replica)
     }
 }
 
@@ -658,6 +733,20 @@ impl ConsensusVoter {
         let block = env.lock().block_tree.new_key_block(proof_pre, join_reqm, leave_reqm);
         Self::package_message(id, Message::Propose(block, prooflist), view, configuration, None)
     }
+
+    // fn new_auto_transition(
+    //     env: Arc<Mutex<Environment>>,
+    //     view: u64,
+    //     configuration: u64,
+    //     proof_pre: Proof,
+    //     proof_auto: Proof,
+    //     id: PublicKey,
+    //     join_reqm: Vec<PublicKey>, 
+    //     leave_reqm: Vec<PublicKey>
+    // ) -> NetworkPackage {
+    //     let block = env.lock().block_tree.new_key_block(proof_pre, join_reqm, leave_reqm);
+    //     Self::package_message(id, Message::AutoTrans(block, proof_auto), view, configuration, None)
+    // }
 
     fn update_proof_pre(&self, new_proof: Proof) -> bool {
         let mut state = self.state.lock();
@@ -926,7 +1015,7 @@ impl ConsensusVoter {
                 }
             }
             Message::Join => {
-              if self.leadership.is_in_L(id) {
+              if self.leadership.is_in_L(&id) {
                 let m_high = self.state.lock().m_high.clone();
                 let m_valid = self.state.lock().m_valid.clone();
                 let membership = self.state.lock().membership.clone();
@@ -939,7 +1028,7 @@ impl ConsensusVoter {
               }
             }
             Message::Leave => {
-              if self.leadership.is_in_L(id) {
+              if self.leadership.is_in_L(&id) {
                 let membership = self.state.lock().membership.clone();
                 let pool_m_leave = self.state.lock().pool_m_join.clone();
                 if membership.contains_voter(&from) && !pool_m_leave.contains(&from) {
@@ -947,6 +1036,70 @@ impl ConsensusVoter {
                   info!("MEMBERSHIP REQUEST HANDLED =====> {} processing valid leave request from: {}", id, from);
                 }
               }
+            }
+            Message::AutoTrans(block, proofauto) => {
+              trace!("{}: receiving auto-trans message from: {}", id, from);
+              if !self.leadership.is_in_L(&from){
+                return;
+              }
+              if view < self.state.lock().view {
+                return;
+              }
+              let hash = block.hash();
+              let join_reqm = block.join_reqm.clone();
+              let leave_reqm = block.leave_reqm.clone();
+            
+              block.verify().unwrap();
+            
+              let proof_com = self.state.lock().proof_com.clone();
+              let proof_pre = self.state.lock().proof_pre.clone();
+              let b_x = block.justify.node;
+              let block_justify = block.justify.clone();
+              let block_hash = block.hash();
+
+              if from != id {
+                  self.env.lock().block_tree.add_block(block, BlockType::Key);
+              }
+
+              // onReceiveProposal
+              if let Some(pkg) = {
+                  //let proof_com = self.state.lock().proof_com.clone();
+                  let safety = self
+                      .env
+                      .lock()
+                      .block_tree
+                      .extends(proof_com.node, block_hash);
+                  let liveness = block_justify.view >= proof_com.view;
+
+                  if view > *voted_view && (safety || liveness) {
+                      *voted_view = view;
+
+                      // Suppose the block is valid, vote for it
+                      Some(Self::package_message(
+                          id,
+                          Message::Vote(hash, id, self.config.sign(&hash)),
+                          current_view,
+                          current_conf,
+                          Some(self.leadership.get_leader(current_view + 1)),
+                      ))
+                  } else {
+                      trace!(
+                          "{}: Safety: {} or Liveness: {} are both invalid",
+                          id,
+                          safety,
+                          liveness
+                      );
+                      None
+                  }
+              } {
+                  trace!("{}: send vote {:?} for block", id, pkg);
+                  tx.send(pkg).await.unwrap();
+              }
+            }
+            Message::AutoVote(digest, author, signature) => {
+              trace!("{}: receiving auto-vote message from: {}", id, from);
+
+              author.verify(&digest, &signature).unwrap();
             }
             Message::NewView(high_proof, digest, author, signature) => {
                 self.update_proof_pre(high_proof);
@@ -1104,6 +1257,7 @@ impl ConsensusVoter {
     async fn run_as_pacemaker(self) {
         let timeout =
             tokio::time::Duration::from_millis(self.config.get_node_settings().timeout as u64);
+        let half_t = tokio::time::Duration::from_millis(self.config.get_node_settings().timeout as u64 / 2);
         let tx = self.env.lock().network.get_sender();
         let id = self.config.get_id();
 
@@ -1111,15 +1265,93 @@ impl ConsensusVoter {
 
         loop {
             let past_view = self.state.lock().view;
-            let next_awake = tokio::time::Instant::now() + timeout.mul_f64(multiplexer as f64);
+            // let next_awake = tokio::time::Instant::now() + timeout.mul_f64(multiplexer as f64);
+            let next_awake = tokio::time::Instant::now() + half_t.mul_f64(multiplexer as f64);
             trace!("{}: pacemaker start", id);
             tokio::time::sleep_until(next_awake).await;
             trace!("{}: pacemaker awake", id);
 
             // If last vote is received later then 1s ago, then continue to sleep.
-            let is_in_formal_conf = self.state.lock().membership.contains_voter(&id);
+            // let is_in_formal_conf = self.state.lock().membership.contains_voter(&id);
             let current_view = self.state.lock().view;
-            if current_view != past_view || !is_in_formal_conf{
+            if current_view != past_view{
+                multiplexer = 1;
+                continue;
+            }
+
+            warn!(
+                "{} auto-transition is needed!!! in view {}, leader: {}",
+                id,
+                current_view,
+                self.leadership.get_leader(current_view)
+            );
+            let configuration = self.state.lock().configuration;
+            let pkg = self.new_auto_vote(current_view, configuration, self.leadership.get_leader(current_view));
+            tx.send(pkg).await.unwrap();
+            if self.leadership.get_leader(current_view) == id {
+              let block_hash = self.env.lock().block_tree.latest_key_block;
+              // trace!("{}: votes are {:?} in view: {}", id, self.state.lock().votes, current_view);
+              let member_remove = self.state.lock().auto_detect(current_view - 1, block_hash);
+              let member_remove: Vec<PublicKey> = member_remove
+              .iter()
+              .filter(|&element| !self.leadership.is_in_L(element))
+              .cloned()
+              .collect();
+              let mut join_reqm = Vec::new();
+              let mut leave_reqm = Vec::new();
+              for pk in member_remove.clone(){
+                self.state.lock().insert_or_update(pk);
+                // redo all uncommitted membership requests.
+                let by_hash = self.state.lock().proof_pre.node;
+                let bz_hash = self.state.lock().proof_com.node;
+                if let Some(b_x) = self.env.lock().block_tree.get_block(block_hash){
+                  join_reqm.extend(b_x.0.join_reqm.clone());
+                  leave_reqm.extend(b_x.0.leave_reqm.clone());
+                }
+                if let Some(b_y) = self.env.lock().block_tree.get_block(by_hash){
+                  join_reqm.extend(b_y.0.join_reqm.clone());
+                  leave_reqm.extend(b_y.0.leave_reqm.clone());
+                }
+                if let Some(b_z) = self.env.lock().block_tree.get_block(bz_hash){
+                  join_reqm.extend(b_z.0.join_reqm.clone());
+                  leave_reqm.extend(b_z.0.leave_reqm.clone());
+                }
+                // join_reqm.extend(self.state.lock().pool_m_join.clone());
+                // leave_reqm.extend(self.state.lock().pool_m_leave.clone());
+                leave_reqm.extend(member_remove.clone());
+                let leave_set: HashSet<_> = leave_reqm.into_iter().collect();
+                let join_set: HashSet<_> = join_reqm.into_iter().collect();
+                leave_reqm = leave_set.into_iter().collect();
+                join_reqm = join_set.into_iter().collect();
+              }
+              join_reqm = join_reqm
+              .iter()
+              .filter(|&element| !member_remove.contains(element))
+              .cloned()
+              .collect();
+              let proof_new = self.state.lock().proof_new.clone();
+              let mut memb = self.state.lock().membership.clone();
+              for pk in join_reqm.clone() {
+                memb.add_voter(pk);
+              }
+              for pk in leave_reqm.clone() {
+                memb.remove_voter(&pk);
+              }
+              self.state.lock().m_auto = memb;
+              self.env.lock().block_tree.new_key_block(proof_new, join_reqm, leave_reqm);
+              // let configuration = self.state.lock().configuration;
+              // let proof_new = self.state.lock().proof_new.clone();
+              // let pkg = Self::new_auto_transition(self.env.to_owned(), current_view, configuration, proof_new, id, join_reqm, leave_reqm);
+              // //trace!("{}: join_reqm are {:?} in view: {}", id, join_reqm, current_view);
+              // tx.send(pkg).await.unwrap();
+
+            }
+
+            let next_awake = tokio::time::Instant::now() + half_t.mul_f64(multiplexer as f64);
+            tokio::time::sleep_until(next_awake).await;
+            trace!("{}: pacemaker awake again", id);
+            let current_view = self.state.lock().view;
+            if current_view != past_view{
                 multiplexer = 1;
                 continue;
             }
@@ -1152,6 +1384,16 @@ impl ConsensusVoter {
             Message::NewView(self.state.lock().proof_pre.clone(), digest, id, signature);
         Self::package_message(self.state.lock().id, new_view, view, configuration, Some(next_leader))
     }
+
+    fn new_auto_vote(&self, view: u64, configuration: u64, leader: PublicKey) -> NetworkPackage {
+      // latest Vote
+      let digest = self.env.lock().block_tree.latest;
+      let id = self.config.get_id();
+      let signature = self.config.get_private_key().sign(&digest);
+      let auto_vote =
+          Message::AutoVote(digest, id, signature);
+      Self::package_message(self.state.lock().id, auto_vote, view, configuration, Some(leader))
+  }
 
     // -> (leaderId, view)
     fn get_next_leader(&self) -> (PublicKey, u64) {
