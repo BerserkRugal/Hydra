@@ -112,7 +112,8 @@ impl Proof {
       if self.node == node{
       match (self.prooftype, prooftype) {
         (ProofType::High(vec1), ProofType::High(vec2))
-        | (ProofType::Val(vec1), ProofType::Val(vec2)) => {if vec1.clone().sort() == vec1.clone().sort() {return true;}}
+        | (ProofType::Val(vec1), ProofType::Val(vec2))
+        | (ProofType::Auto(vec1), ProofType::Auto(vec2)) => {if vec1.clone().sort() == vec1.clone().sort() {return true;}}
         _ => {}
       };
     }

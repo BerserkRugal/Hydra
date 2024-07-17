@@ -48,8 +48,8 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) mempool_size: Option<usize>,
 
-    /// Pacemaker timeout, default value is 5000ms.
-    /// Configuration auto-transition will start when the timer is half over.
+    /// Pacemaker timeout, default value is 2500ms.
+    /// Viewchange protocol will be activated after 4 timeouts (auto-transition).
     #[arg(long)]
     pub(crate) timeout: Option<usize>,
 
