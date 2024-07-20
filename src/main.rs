@@ -356,9 +356,86 @@ async fn main() -> Result<()> {
 
             let _ = tokio::join!(handle);
         }
+        Some(Commands::DisTest { number, dis_number, when, busy}) => {
+            let voter_set: Vec<_> = generate_keypairs(number);
+            let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
+            let inum = max(number-dis_number, lnum);
+            // let inum = max(inum, lnum);
+            let initial_set: Vec<_> = voter_set.iter().take(inum).cloned().collect();
+            let rest_set: Vec<_> = voter_set.iter().filter(|&element| !initial_set.contains(element)).cloned().collect();
+            let l_set: Vec<_> = voter_set.iter().take(lnum).cloned().collect();
+            let genesis = data::Block::genesis();
+
+            let mut network = MemoryNetwork::new();
+            config.test_mode.discovery_test = true;
+
+            // Mock peers
+            config.override_voter_set(&VoterSet::new(
+                voter_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_initial_members(&VoterSet::new(
+              initial_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+            config.override_l(&VoterSet::new(
+              l_set.iter().map(|(pk, _)| *pk).collect(),
+            ));
+
+
+            // Prepare the environment.
+            let nodes: Vec<_> = initial_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();
+
+             let rest_nodes: Vec<_> = rest_set
+                .into_iter()
+                .map(|(id, secret)| {
+                    let adaptor = network.register(id);
+                    Node::new(
+                        config.clone_with_keypair(id, secret),
+                        adaptor,
+                        genesis.to_owned(),
+                    )
+                })
+                .collect();    
+
+            // Boot up the network.
+            let handle = tokio::spawn(async move {
+                network.dispatch().await?;
+                Ok::<_, anyhow::Error>(())
+            });
+
+            nodes.get(0).unwrap().metrics();
+
+            // Run the nodes.
+            nodes.into_iter().for_each(|node| {
+                node.spawn_run();
+            });
+            if busy == false {
+               rest_nodes.into_iter().for_each(|node| {
+                  node.spawn_run_membership_test(5,when);
+               });
+            }else{
+                rest_nodes.into_iter().for_each(|node| {
+                node.spawn_run_membership_test(6, when);
+             });
+            }
+
+            let _ = tokio::join!(handle);
+        }
         Some(Commands::ConfigGen {
             number,
             initial_number,
+            leave_number,
+            modehybrid,
+            sequential,
             mut hosts,
             mut export_dir,
             write_file,
@@ -386,7 +463,7 @@ async fn main() -> Result<()> {
                 hosts.push(String::from("localhost"))
             }
 
-            let distribution_plan = DistributionPlan::new(number, initial_number, hosts, config, failure_nodes);
+            let distribution_plan = DistributionPlan::new(number, initial_number, leave_number, modehybrid, sequential, hosts, config, failure_nodes);
 
             if !write_file {
                 for (path, content) in distribution_plan.dry_run(&export_dir)? {
@@ -414,19 +491,38 @@ async fn main() -> Result<()> {
             } else {
                 TcpNetwork::spawn(config.get_local_addr()?.to_owned(), config.get_peer_addrs())
             };
+            let mtime = config.get_node_settings().mtime;
 
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-            let node = Node::new(config, adapter, data::Block::genesis());
+            let node = Node::new(config.clone(), adapter, data::Block::genesis());
 
             if !cli.disable_metrics {
                 node.metrics();
             }
-
             // Run the node
-            let handle = node.spawn_run();
+            if config.get_node_settings().clone().join {
+              if config.get_node_settings().modehybrid {
+                let handle = node.spawn_run_membership_test(3,mtime);
+                let _ = handle.await;
+              }else{
+                let handle = node.spawn_run_membership_test(1,mtime);
+                let _ = handle.await;
+              }
+            }else if config.get_node_settings().clone().leave {
+              if config.get_node_settings().modehybrid {
+                let handle = node.spawn_run_membership_test(4,mtime);
+                let _ = handle.await;
+              }else{
+                let handle = node.spawn_run_membership_test(2,mtime);
+                let _ = handle.await;
+              }
+            }else{
+              let handle = node.spawn_run();
 
-            let _ = handle.await;
+              let _ = handle.await;
+            }
+            
         }
     }
     Ok(())

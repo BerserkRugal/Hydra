@@ -56,6 +56,7 @@ pub(crate) struct VoterState {
     pub proof_pre: Proof,
     pub proof_com: Proof,
     pub proof_new: Proof,
+    // pub proof_ncom: Proof,
     // <view, (what, whos)>
     pub votes: HashMap<u64, HashMap<Digest, Vec<PublicKey>>>,
     pub proofs: HashMap<u64, Vec<Proof>>,
@@ -84,7 +85,8 @@ impl VoterState {
             threshold,
             proof_pre: proof_pre.to_owned(),
             proof_com: proof_pre.to_owned(),
-            proof_new: proof_pre,
+            proof_new: proof_pre.to_owned(),
+            // proof_ncom: proof_pre,
             votes: HashMap::new(),
             proofs: HashMap::new(),
             prooflist: Vec::new(),
@@ -103,7 +105,7 @@ impl VoterState {
         // Prune old votes
         self.votes.retain(|v, _| v >= &self.view);
         self.new_views.retain(|v, _| v >= &self.view);
-        self.proofs.retain(|v, _| v >= &self.view);
+        self.proofs.retain(|v, _| v + 1 >= self.view);
         self.auto_trans.retain(|v, _| v >= &self.view);
 
         self.view += 1;
@@ -234,7 +236,16 @@ impl VoterState {
                       );
                       proof_map.push(Proof::new(self.proof_pre.node, self.proof_pre.view, ProofType::Con2(value), voters.clone()));
                     } else {
-                      
+                    //   trace!(
+                    //     "{}: receiving votes from {} in {}, current votes:{:?} for {:?} CON2, threshold: {}, current: {}",
+                    //     self.id,
+                    //     voter_id,
+                    //     msg_view,
+                    //     voters.clone(),
+                    //     self.proof_pre.node,
+                    //     keys.0.threshold(),
+                    //     self.view
+                    // );
                     }
                   }
                 }
@@ -259,7 +270,16 @@ impl VoterState {
                       );
                       proof_map.push(Proof::new(self.proof_com.node, self.proof_com.view, ProofType::Com(value), voters.clone()));
                     } else {
-                      
+                    //   trace!(
+                    //     "{}: receiving votes from {} in {}, current votes:{:?} for COM {:?}, threshold: {}, current: {}",
+                    //     self.id,
+                    //     voter_id,
+                    //     msg_view,
+                    //     voters.clone(),
+                    //     self.proof_com.node,
+                    //     keys.0.threshold(),
+                    //     self.view
+                    // );
                     }
                   }
                 }
@@ -321,11 +341,23 @@ impl VoterState {
       &mut self,
       view: u64,
       block_hash: Digest,
+      mode: u64,
     ) -> Vec<PublicKey> {
         let mut rset = Vec::new();
         let view_map = self.votes.entry(view).or_default();
         let voters = view_map.entry(block_hash).or_default();
         let configuration = self.configuration;
+        if mode == 0{
+          if voters.len() < self.m_auto.threshold() {
+            for pk in self.m_auto.get_voters() {
+              if !voters.contains(&pk) {
+                rset.push(pk)
+              }
+            }
+           }
+          return rset;
+        }
+
         if let Some(hismem) = self.hisconf.get(&configuration){
          if voters.len() < hismem.0.threshold() {
             for pk in hismem.0.get_voters() {
@@ -335,6 +367,7 @@ impl VoterState {
             }
         }
       }
+
       match self.proof_pre.prooftype {
             ProofType::Con1(value) => {
               if self.hisconf.contains_key(&value){
@@ -640,7 +673,27 @@ impl Voter {
           self_clone.test_join(view).await;
         });
         
+        }else if mode == 5 {
+          let self_clone = self.clone();
+          tokio::spawn(async move{ 
+          sleep(Duration::from_millis(delay_time as u64)).await;
+          let view = state.lock().view;
+          let endc = state.lock().configuration;
+          let startc = 0;
+          self_clone.test_confdis(startc, endc, view, endc).await;
+          });
+        }else if mode == 6 {
+          let self_clone = self.clone();
+          tokio::spawn(async move{ 
+          sleep(Duration::from_millis(delay_time as u64)).await;
+          let view = state.lock().view;
+          let endc = state.lock().configuration;
+          let startc = 0;
+          self_clone.test_confdis(startc, endc, view, endc).await;
+          self_clone.test_join(view).await;
+          });
         }
+
         let (r1, r2, r3) = tokio::join!(handler1, handler2, handler3);
         
         // TODO: handle error
@@ -688,6 +741,24 @@ impl Voter {
       };
       info!("MEMBERSHIP REQUEST INITIATED =====> {} sending leave request to: {}", self.id, to);
       tx.send(pkg).await.unwrap();
+    }
+
+    pub(crate) async fn test_confdis(&self, startc: u64, endc: u64, view: u64, configuration: u64) {
+        let (mut tx) = {
+        let mut env = self.env.lock();
+        let tx = env.network.get_sender();
+        (tx)
+        };
+        let pkg = NetworkPackage {
+          from: self.id,
+          to: None,
+          view: Some(view),
+          configuration: Some(configuration),
+          message: Message::ConfDis(startc, endc),
+          signature: 0,
+        };
+        tx.send(pkg).await.unwrap();
+        info!("{}: starting configuration discovery (this INFO is only printed in the test environment for timing purposes).", self.id);
     }
 }
 
@@ -993,6 +1064,10 @@ impl ConsensusVoter {
                     if proofcon2.clone().is_formal_proof(proof_pre.node, proof_pre.prooftype){
                       if proofhigh.clone().is_temp_proof(proof_pre.node, ProofType::High(m_high.get_voters())){
                         self.state.lock().proof_com = proofcon2.clone();
+                        // let proofncom = self.state.lock().proof_ncom.clone();
+                        // if proofcon2.view > proofncom.view {
+                        //   self.state.lock().proof_ncom = proofcon2.clone();
+                        // }
                         self.state.lock().m_valid = m_high.clone();
                         trace!("{}: update proof_com from :{:?} to : {:?}", id, proof_com, proofcon2);
                       }
@@ -1048,6 +1123,7 @@ impl ConsensusVoter {
                 let proof = self.state.lock().add_vote(view, block_hash, from);
                 let prooflist = self.state.lock().create_prooflist(view, from, 4);
                 let proof_new = self.state.lock().proof_new.clone();
+                // let proof_ncom = self.state.lock().proof_ncom.clone();
                 // verify signature
                 author.verify(&block_hash, &signature).unwrap();
 
@@ -1060,7 +1136,17 @@ impl ConsensusVoter {
                     if proof.view != proof_new.view {
                     // self.update_proof_pre(proof);
                     self.update_proof_new(proof);
-                    self.state.lock().prooflist = prooflist;
+                    self.state.lock().prooflist = prooflist.clone();
+                  //   for pf in prooflist{
+                  //     match pf.prooftype {
+                  //       ProofType::Con2(value) => {
+                  //         if pf.view > proof_ncom.view {
+                  //           self.state.lock().proof_ncom = pf;
+                  //         }
+                  //       }
+                  //       _=>{}
+                  //   }
+                  // }
                     self.state.lock().set_best_view(view);
                     }
                   }
@@ -1207,24 +1293,28 @@ impl ConsensusVoter {
                 self.state.lock().add_new_view(view, from);
             }
             Message::ConfDis(startc, endc) => {
-              if endc <= configuration && endc>= startc {
-              let result: HashMap<u64, (VoterSet,Digest,Proof)> = self.state.lock().hisconf.clone()
-                .iter()
-                .filter(|(key, _)| **key >= startc && **key <= endc)
-                .map(|(&key, value)| (key, value.clone()))
-                .collect();
+              if from!= id {
+                if endc <= configuration && endc>= startc {
+                // info!("{}: receiving CONFDIS from: {}", id, from);
+                let result: HashMap<u64, (VoterSet,Digest,Proof)> = self.state.lock().hisconf.clone()
+                  .iter()
+                  .filter(|(key, _)| **key >= startc && **key <= endc)
+                  .map(|(&key, value)| (key, value.clone()))
+                  .collect();
 
-              let pkg = Self::package_message(
-                  id,
-                  Message::Discovery(result),
-                  current_view,
-                  current_conf,
-                  Some(from),
-                );
-              tx.send(pkg).await.unwrap();
+                let pkg = Self::package_message(
+                    id,
+                    Message::Discovery(result),
+                    current_view,
+                    current_conf,
+                    Some(from),
+                  );
+                tx.send(pkg).await.unwrap();
+                }
               }
             }
             Message::Discovery(subconf) => {
+              // info!("{}: receiving DISCOVERY from: {}", id, from);
               let c = subconf.keys().min().unwrap();
               if self.is_valid_his(subconf.clone(), *c){
                 let mut hisconf = self.state.lock().hisconf.clone();
@@ -1232,6 +1322,9 @@ impl ConsensusVoter {
                   hisconf.entry(key).and_modify(|v| *v = value.clone()).or_insert(value.clone());
                 }
                 self.state.lock().hisconf = hisconf;
+                if self.config.test_mode.discovery_test == true {
+                  info!("{}: finishing configuration discovery (this INFO is only printed in the test environment for timing purposes).", id);
+                }
               }
             }
         }
@@ -1280,7 +1373,24 @@ impl ConsensusVoter {
                             current_view,
                             pkgs.len()
                         );
+                        let mut recvote = 0;
                         for pkg in pkgs.into_iter() {
+                          let message = pkg.message.clone();
+                          let pview = pkg.view.unwrap();
+                          match message {
+                            Message::Vote(block_hash, author, signature) => {
+                              if pview == current_view {
+                                recvote = 1;
+                                if let Some(v) = buffer.get_mut(&pview) {
+                                  v.push(pkg);
+                                } else {
+                                    buffer.insert(pview, vec![pkg]);
+                                }
+                                continue;
+                              }
+                            }
+                            _=>{}
+                          }
                             self.process_message(
                                 pkg,
                                 id,
@@ -1289,6 +1399,9 @@ impl ConsensusVoter {
                                 &finalized_block_tx,
                             )
                             .await;
+                        }
+                        if recvote == 1 {
+                          break;
                         }
                     }
                 }
@@ -1318,8 +1431,32 @@ impl ConsensusVoter {
                     buffer.insert(view, vec![pkg]);
                 }
             } else {
+                let message = pkg.message.clone();
+                match message {
+                  Message::Vote(block_hash, author, signature) => {
+                    if view == current_view {
+                      if let Some(v) = buffer.get_mut(&view) {
+                        v.push(pkg);
+                      } else {
+                          buffer.insert(view, vec![pkg]);
+                      }
+                      continue;
+                    }
+                  }
+                  _=>{}
+                }
                 // Deal with the messages larger than current view
-
+                if configuration > current_conf + 1{
+                  let pkg = Self::package_message(
+                    id,
+                    Message::ConfDis(current_conf, configuration),
+                    current_view,
+                    current_conf,
+                    None,
+                    );
+                  tx.send(pkg).await.unwrap();
+                  self.state.lock().configuration = configuration;
+                }
                 self.process_message(pkg, id, &mut voted_view, &tx, &finalized_block_tx)
                     .await;
             }
@@ -1403,15 +1540,16 @@ impl ConsensusVoter {
             }
 
             warn!(
-                "{} auto-transition is needed!!! in view {}, leader: {}",
+                "{} auto-transition (seq 1) is needed!!! in view {}, leader: {}",
                 id,
                 current_view,
                 self.leadership.get_leader(current_view)
             );
+            // try configuration auto-transition first
             if self.leadership.get_leader(current_view) == id {
               let block_hash = self.env.lock().block_tree.latest_key_block;
               // trace!("{}: votes are {:?} in view: {}", id, self.state.lock().votes, current_view);
-              let member_remove = self.state.lock().auto_detect(current_view - 1, block_hash);
+              let member_remove = self.state.lock().auto_detect(current_view - 1, block_hash, 1);
               let member_remove: Vec<PublicKey> = member_remove
               .iter()
               .filter(|&element| !self.leadership.is_in_L(element))
@@ -1470,6 +1608,75 @@ impl ConsensusVoter {
             let pkg = self.new_auto_vote(current_view, configuration, 0, self.leadership.get_leader(current_view));
             tx.send(pkg).await.unwrap();
 
+            // Theoretically, the auto-transition must be completed within two attemps, 
+            // of course, in order to cope with the unexpected situation in reality, here can be set to a cycle for more auto-transitions
+            // (if you want them).
+            {
+              let next_awake = tokio::time::Instant::now() + timeout.mul_f64(multiplexer as f64);
+              tokio::time::sleep_until(next_awake).await;
+              trace!("{}: pacemaker awake again", id);
+              let current_view = self.state.lock().view;
+              if current_view != past_view{
+                  multiplexer = 1;
+                  continue;
+              }
+              warn!(
+                "{} auto-transition (seq 2) is needed!!! in view {}, leader: {}",
+                id,
+                current_view,
+                self.leadership.get_leader(current_view)
+              );
+              if self.leadership.get_leader(current_view) == id {
+                let block_hash = self.env.lock().block_tree.latest_key_block;
+                // trace!("{}: votes are {:?} in view: {}", id, self.state.lock().votes, current_view);
+                let member_remove = self.state.lock().auto_detect(current_view, block_hash, 0);
+                let member_remove: Vec<PublicKey> = member_remove
+                .iter()
+                .filter(|&element| !self.leadership.is_in_L(element))
+                .cloned()
+                .collect();
+                let mut join_reqm = Vec::new();
+                let mut leave_reqm = Vec::new();
+                for pk in member_remove.clone(){
+                  self.state.lock().insert_or_update(pk);
+                  // redo all uncommitted membership requests.
+                  if let Some(b_x) = self.env.lock().block_tree.get_block(block_hash){
+                    join_reqm.extend(b_x.0.join_reqm.clone());
+                    leave_reqm.extend(b_x.0.leave_reqm.clone());
+                  }
+                  leave_reqm.extend(member_remove.clone());
+                  let leave_set: HashSet<_> = leave_reqm.into_iter().collect();
+                  let join_set: HashSet<_> = join_reqm.into_iter().collect();
+                  leave_reqm = leave_set.into_iter().collect();
+                  join_reqm = join_set.into_iter().collect();
+                }
+                join_reqm = join_reqm
+                .iter()
+                .filter(|&element| !member_remove.contains(element))
+                .cloned()
+                .collect();
+                let proof_new = self.state.lock().proof_new.clone();
+                let mut memb = self.state.lock().membership.clone();
+                for pk in join_reqm.clone() {
+                  memb.add_voter(pk);
+                }
+                for pk in leave_reqm.clone() {
+                  memb.remove_voter(&pk);
+                }
+                self.env.lock().block_tree.new_key_block(proof_new, join_reqm, leave_reqm);
+                self.state.lock().m_auto = memb;
+                // let configuration = self.state.lock().configuration;
+                // let proof_new = self.state.lock().proof_new.clone();
+                // let pkg = Self::new_auto_transition(self.env.to_owned(), current_view, configuration, proof_new, id, join_reqm, leave_reqm);
+                // //trace!("{}: join_reqm are {:?} in view: {}", id, join_reqm, current_view);
+                // tx.send(pkg).await.unwrap();
+  
+              }
+              let configuration = self.state.lock().configuration;
+              let pkg = self.new_auto_vote(current_view, configuration, 1, self.leadership.get_leader(current_view));
+              tx.send(pkg).await.unwrap();
+            }
+
             let next_awake = tokio::time::Instant::now() + timeout.mul_f64(multiplexer as f64);
             tokio::time::sleep_until(next_awake).await;
             trace!("{}: pacemaker awake again", id);
@@ -1478,6 +1685,11 @@ impl ConsensusVoter {
                 multiplexer = 1;
                 continue;
             }
+
+
+
+            // If the members in L are ascertained not to be offline
+            // Instead of setting up a view-change protocol, it is possible to continue continue the auto-transition.
 
             warn!(
                 "{} timeout!!! in view {}, leader: {}",

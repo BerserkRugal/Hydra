@@ -36,6 +36,22 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) pretend_failure: bool,
 
+    /// be a node not in the initial configuration and join later
+    #[arg(long)]
+    pub(crate) join: bool,
+
+    /// be a node in initial configuration but leave later
+    #[arg(long)]
+    pub(crate) leave: bool,
+
+    /// (Provided join or leave is yes) Execute the opposite membership request again 15s after the completion of the previous membership request.
+    #[arg(long)]
+    pub(crate) modehybrid: bool,
+
+    /// time from start of consensus to initiation of first membership request
+    #[arg(long)]
+    pub(crate) mtime: Option<usize>,
+
     /// Disable metrics.
     #[arg(long)]
     pub(crate) disable_metrics: bool,
@@ -49,7 +65,7 @@ pub(crate) struct Cli {
     pub(crate) mempool_size: Option<usize>,
 
     /// Pacemaker timeout, default value is 2500ms.
-    /// Viewchange protocol will be activated after 4 timeouts (auto-transition).
+    /// Viewchange protocol will be activated after 3 timeouts (i.e. 2 auto-transitions).
     #[arg(long)]
     pub(crate) timeout: Option<usize>,
 
@@ -77,8 +93,8 @@ pub(crate) enum Commands {
         #[arg(short, long, default_value_t = 4)]
         initial_number: usize,
 
-        /// Sequential join (replicas not in the initial configuration send join requests at 5s intervals one-by-one).
-        /// Set to false to have replicas send join requests at the same time.
+        /// Set to true to have replicas not in the initial configuration send join requests at 5s intervals one-by-one.
+        /// Otherwise replicas send join requests at the same time.
         #[arg(short, long, default_value_t = false)]
         sequential_join: bool,
     },
@@ -95,8 +111,8 @@ pub(crate) enum Commands {
       #[arg(short, long, default_value_t = 0)]
       leave_number: usize,
 
-      /// Sequential leave ('leave_number' replicas send leave requests at 5s intervals one-by-one).
-      /// Set to false to have replicas send leave requests at the same time.
+      /// Set to true to have 'leave_number' replicas send leave requests at 5s intervals one-by-one.
+      /// Otherwise replicas send leave requests at the same time.
       #[arg(short, long, default_value_t = false)]
       sequential_leave: bool,
     },
@@ -118,8 +134,8 @@ pub(crate) enum Commands {
       #[arg(short, long, default_value_t = 0)]
       leave_number: usize,
 
-      /// Sequential (replicas send membership requests at 5s intervals one-by-one).
-      /// Set to false to have at least two replicas send a join request and a leave request at the same time.
+      /// Set to true to have replicas send membership requests at 5s or 10s intervals one-by-one.
+      /// Otherwise at least two replicas send a join request and a leave request at the same time.
       #[arg(short, long, default_value_t = false)]
       sequential: bool,
     },
@@ -133,7 +149,24 @@ pub(crate) enum Commands {
         #[arg(short, long, default_value_t = 1)]
         fault: usize,
     },
+    /// Test the approximate time required for configuration discovery.
+    DisTest {
+      /// Number of nodes.
+      #[arg(short, long, default_value_t = 4)]
+      number: usize,
 
+      /// Number of nodes performing configuration discovery simultaneously.
+      #[arg(short, long, default_value_t = 1)]
+      dis_number: usize,
+
+      /// Nodes execute the configuration discovery protocol after "when" ms.
+      #[arg(short, long, default_value_t = 5000)]
+      when: usize,
+
+      /// Simulate a network environment with frequent membership requests when performing configuration discovery.
+      #[arg(short, long, default_value_t = false)]
+      busy: bool,
+    },
     /// Generate all configs for a single test.
     ///
     /// This command distributes `number` replicas into `hosts`,
@@ -144,8 +177,27 @@ pub(crate) enum Commands {
         number: usize,
 
         /// Number of nodes (M0).
+        /// 'initial_number' replicas forming the initial configuration.  
+        /// The remaining replicas will send join requests to join later.
+        /// Please keep the |L|<=initial_number<=number
         #[arg(short, long, default_value_t = 4)]
         initial_number: usize,
+
+        /// 'leave_number' replicas will leave later by sending leave requests.
+        /// Please keep initial_number-leave_number>=|L|.
+        #[arg(short, long, default_value_t = 0)]
+        leave_number: usize,
+
+        /// If set to true, then the joining replica will leave again 15s after joining, ditto for the leaving replica.
+        #[arg(short, long)]
+        modehybrid: bool,
+
+        /// Set to true to have replicas send membership requests at 5 or 10s intervals one-by-one.
+        /// Otherwise, at least two replicas send a join request and a leave request at the same time.
+        /// Note that the first member request (if exists) will be initiated 5s after the start of consensus by default.
+        /// You can also adjust this time by modifying the configuration file for each node.
+        #[arg(short, long)]
+        sequential: bool,
 
         /// hosts to distribute replicas.
         hosts: Vec<String>,

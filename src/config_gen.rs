@@ -3,7 +3,7 @@ use std::{
     env,
     net::ToSocketAddrs,
     path::{Path, PathBuf},
-    cmp::min,
+    cmp::{min,max},
 };
 
 use crate::{crypto::generate_keypairs, node_config::NodeConfig};
@@ -110,13 +110,21 @@ impl DistributionPlan {
     pub(crate) fn new(
         number: usize,
         initial_number: usize,
+        leave_number: usize,
+        modehybrid: bool,
+        sequential: bool,
         hosts: Vec<String>,
         base_config: NodeConfig,
         failure_nodes: usize,
     ) -> Self {
         let voter_set: Vec<_> = generate_keypairs(number);
+        // let inum = min(number, initial_number);
+        // let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
         let inum = min(number, initial_number);
-        let lnum = 1 + ((((number as f64  / 3.0).floor()-1.0)/2.0).floor() as usize);
+        let jnum = min(initial_number, leave_number);
+        let lnum = 1 + ((((number as f64 / 3.0).floor()-1.0)/2.0).floor() as usize);
+        let inum = max(inum, lnum);
+        let jnum = max(initial_number-jnum, lnum);
         let mut peer_addrs = BTreeMap::new();
 
         voter_set
@@ -143,6 +151,11 @@ impl DistributionPlan {
         for (idx, host) in hosts.iter().enumerate() {
             execution_plans.push(ExecutionPlan::new(idx, host.to_owned()));
         }
+        let mut jtime = 5000;
+        let mut ltime = 5000;
+        if number != initial_number && sequential {
+          ltime = 10000;
+        }
 
         voter_set
             .into_iter()
@@ -152,6 +165,51 @@ impl DistributionPlan {
                 config.set_peer_addrs(peer_addrs.clone());
                 config.set_initial_members(initial_members.clone());
                 config.set_l(l_set.clone());
+                if idx >= jnum && idx < inum{
+                  config.set_leave();
+                  if modehybrid {
+                    config.set_hybrid();
+                  }
+                  if sequential {
+                    if inum == number {
+                      config.set_mtime(ltime);
+                      ltime = ltime + 5000;
+                    }else {
+                      config.set_mtime(ltime);
+                      ltime = ltime + 10000;
+                    }
+                   }else{
+                    if inum == number {
+                      config.set_mtime(ltime);
+                    }else {
+                      config.set_mtime(ltime);
+                      ltime = ltime + 5000;
+                    }
+                   }   
+                }
+
+                if idx >= inum {
+                  config.set_join();
+                  if modehybrid {
+                    config.set_hybrid();
+                  }
+                  if sequential {
+                    if leave_number == 0 {
+                      config.set_mtime(jtime);
+                      jtime = jtime + 5000;
+                    }else {
+                      config.set_mtime(jtime);
+                      jtime = jtime + 10000;
+                    }
+                   }else{
+                    if leave_number == 0 {
+                      config.set_mtime(jtime);
+                    }else {
+                      config.set_mtime(jtime);
+                      jtime = jtime + 5000;
+                    }
+                   }    
+                }
 
                 // The last `failure_nodes` nodes will be marked as failure nodes.
                 if idx >= number - failure_nodes {

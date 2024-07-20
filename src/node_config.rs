@@ -40,6 +40,13 @@ pub(crate) struct NodeSettings {
     pub(crate) gc_depth: usize,
     /// Pacemaker timeout
     pub(crate) timeout: usize,
+
+    // The following are relevant to membership requests
+    pub(crate) join: bool,
+    pub(crate) leave: bool,
+    pub(crate) modehybrid: bool,
+    // Time of initiation of the first membership request after the start of consensus.
+    pub(crate) mtime: usize,
 }
 
 impl Default for NodeSettings {
@@ -49,9 +56,13 @@ impl Default for NodeSettings {
             batch_size: 500,
             mempool_size: 5000,
             pretend_failure: false,
-            leader_rotation: 5,
+            leader_rotation: 1,
             gc_depth: 2000,
             timeout: 2500,
+            join: false,
+            leave: false,
+            modehybrid: false,
+            mtime: 5000,
         }
     }
 }
@@ -110,6 +121,8 @@ pub(crate) struct TestMode {
     pub(crate) memory_test_hybrid: bool,
     #[serde(default)]
     pub(crate) fault_test: bool,
+    #[serde(default)]
+    pub(crate) discovery_test: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -242,6 +255,22 @@ impl NodeConfig {
 
             if cli.pretend_failure {
                 cfg.node_settings.pretend_failure = true;
+            }
+
+            if cli.join {
+              cfg.node_settings.join = true;
+            }
+
+            if cli.leave {
+              cfg.node_settings.leave = true;
+            }
+
+            if cli.modehybrid {
+              cfg.node_settings.modehybrid = true;
+            }
+
+            if let Some(v) = cli.mtime {
+              cfg.node_settings.mtime = v;
             }
 
             if let Some(v) = cli.rate {
@@ -401,6 +430,22 @@ impl NodeConfig {
 
     pub fn set_pretend_failure(&mut self) {
         self.node_settings.pretend_failure = true;
+    }
+
+    pub fn set_join(&mut self) {
+      self.node_settings.join = true;
+    }
+
+    pub fn set_leave(&mut self) {
+      self.node_settings.leave = true;
+    }
+
+    pub fn set_hybrid(&mut self) {
+      self.node_settings.modehybrid = true;
+    }
+
+    pub fn set_mtime(&mut self, mtime: usize) {
+      self.node_settings.mtime = mtime;
     }
 
     pub fn sign(&self, msg: &Digest) -> Signature {

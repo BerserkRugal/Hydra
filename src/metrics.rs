@@ -101,7 +101,7 @@ impl Metrics {
                 self.next_sample_index += 1;
             }
 
-            self.try_exit().unwrap();
+            // self.try_exit().unwrap();
         }
     }
 
