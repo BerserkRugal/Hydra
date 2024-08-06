@@ -952,6 +952,7 @@ impl ConsensusVoter {
                 let mut proofcom = Proof::default();
                 let mut proofhigh = Proof::default();
                 let mut proofval = Proof::default();
+                let mut confcom = 0;
                 for proof in prooflist{
                   match proof.prooftype {
                     ProofType::Con2(value) => {
@@ -959,6 +960,7 @@ impl ConsensusVoter {
                     }
                     ProofType::Com(value) => {
                       proofcom = proof;
+                      confcom = value;
                     }
                     ProofType::High(ref vec) => {
                       proofhigh = proof;
@@ -1100,13 +1102,28 @@ impl ConsensusVoter {
                         }
                         // DECIDE phase on b_z / Finalize b_z
                         // let finalized_blocks = self.env.lock().block_tree.finalize(b_z);
-                        let finalized_blocks = self.env.lock().block_tree.finalize(proofcom.node);
-                        // onCommit
-                        if let Some(tx) = finalized_block_tx.as_ref() {
-                            for block in finalized_blocks {
-                                tx.send(block).await.unwrap();
-                            }
+                        let mut commem = VoterSet::new(Vec::new());
+                        if self.state.lock().hisconf.contains_key(&confcom){
+                          if let Some(keys) = self.state.lock().hisconf.get(&confcom){
+                            commem = keys.0.clone();
+                          }
                         }
+                        if commem.contains_voter(&id){ // if responsible for the proposal
+                          let finalized_blocks = self.env.lock().block_tree.finalize(proofcom.node);
+                        // onCommit
+                          if let Some(tx) = finalized_block_tx.as_ref() {
+                              for block in finalized_blocks {
+                                  tx.send(block).await.unwrap();
+                              }
+                          }
+                        }
+                        // let finalized_blocks = self.env.lock().block_tree.finalize(proofcom.node);
+                        // // onCommit
+                        // if let Some(tx) = finalized_block_tx.as_ref() {
+                        //     for block in finalized_blocks {
+                        //         tx.send(block).await.unwrap();
+                        //     }
+                        // }
                       }
                     }
                 //   }
