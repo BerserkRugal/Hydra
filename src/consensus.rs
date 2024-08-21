@@ -533,8 +533,17 @@ impl VoterSet {
         Self { voters }
     }
 
+    // pub fn threshold(&self) -> usize {
+    //    self.voters.len() - (self.voters.len() as f64 / 3.0).floor() as usize
+    // }
     pub fn threshold(&self) -> usize {
-        self.voters.len() - (self.voters.len() as f64 / 3.0).floor() as usize
+        if (self.voters.len() as f64 / 3.0) == ((self.voters.len()/3) as f64){
+          self.voters.len() - (self.voters.len() as f64 / 3.0).floor() as usize + 1
+        }
+        //else if (self.voters.len() as f64 / 3.0) > ((self.voters.len()/3) as f64)
+        else{
+          self.voters.len() - (self.voters.len() as f64 / 3.0).floor() as usize
+        }
     }
 
     pub fn iter(&self) -> Iter<PublicKey> {
